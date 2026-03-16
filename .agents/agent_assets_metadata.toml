@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "AFo8v2wP27AI4wu6OKEHz"
+uri = "file://README.md"
+type = "text"
+title = "README.md — omni-variational"
