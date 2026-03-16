@@ -1,0 +1,13 @@
+packages:
+  "framer-motion": "For smooth layout animations and premium dashboard feel"
+  "clsx": "For conditional class merging"
+  "tailwind-merge": "For merging tailwind classes safely"
+  "date-fns": "For formatting timestamps in trade history"
+  "react-hook-form": "For robust configuration form state management"
+  "@hookform/resolvers": "For Zod schema validation in forms"
+  "lucide-react": "Beautiful consistent icons"
+
+notes:
+  - Using generated Orval hooks from @workspace/api-client-react
+  - Simulating dark mode premium trading terminal aesthetic
+  - Assuming API runs on same origin (proxy handles /api)

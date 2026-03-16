@@ -1,0 +1,316 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: bot
+    description: Grid bot control and monitoring
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot status and live statistics
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the grid bot
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the grid bot
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/config:
+    get:
+      operationId: getBotConfig
+      tags: [bot]
+      summary: Get current bot configuration
+      responses:
+        "200":
+          description: Current config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotConfig"
+    patch:
+      operationId: updateBotConfig
+      tags: [bot]
+      summary: Update bot configuration (bot must be stopped first)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BotConfig"
+      responses:
+        "200":
+          description: Updated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotConfig"
+        "400":
+          description: Invalid config or bot is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /bot/trades:
+    get:
+      operationId: getBotTrades
+      tags: [bot]
+      summary: Get trade history
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trades:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Trade"
+                required:
+                  - trades
+
+  /bot/reset:
+    post:
+      operationId: resetBot
+      tags: [bot]
+      summary: Reset bot state (stop bot, clear trades, restore balance)
+      responses:
+        "200":
+          description: Bot reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    BotConfig:
+      type: object
+      properties:
+        ticker:
+          type: string
+          description: Asset ticker symbol
+        gridLow:
+          type: number
+          description: Lower price bound (USDC)
+        gridHigh:
+          type: number
+          description: Upper price bound (USDC)
+        gridCount:
+          type: integer
+          description: Number of grid levels
+        orderSizeUsdc:
+          type: number
+          description: Order size per level in USDC
+        initialBalance:
+          type: number
+          description: Initial paper trading balance (USDC)
+        pollIntervalMs:
+          type: integer
+          description: Price polling interval in milliseconds
+      required:
+        - ticker
+        - gridLow
+        - gridHigh
+        - gridCount
+        - orderSizeUsdc
+        - initialBalance
+        - pollIntervalMs
+
+    GridLevelStatus:
+      type: object
+      properties:
+        price:
+          type: number
+        isOpen:
+          type: boolean
+        buyPrice:
+          type: number
+        quantity:
+          type: number
+        realizedPnl:
+          type: number
+        tradeCount:
+          type: integer
+      required:
+        - price
+        - isOpen
+        - buyPrice
+        - quantity
+        - realizedPnl
+        - tradeCount
+
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        ticker:
+          type: string
+        currentPrice:
+          type: number
+          nullable: true
+        balance:
+          type: number
+        initialBalance:
+          type: number
+        openPositions:
+          type: integer
+        totalLevels:
+          type: integer
+        realizedPnl:
+          type: number
+        unrealizedPnl:
+          type: number
+        totalPnl:
+          type: number
+        fillCount:
+          type: integer
+        fetchCount:
+          type: integer
+        uptimeSeconds:
+          type: integer
+        inRange:
+          type: boolean
+        fundingRate:
+          type: string
+        volume24h:
+          type: string
+        gridLow:
+          type: number
+        gridHigh:
+          type: number
+        gridCount:
+          type: integer
+        orderSizeUsdc:
+          type: number
+        pollIntervalMs:
+          type: integer
+        levels:
+          type: array
+          items:
+            $ref: "#/components/schemas/GridLevelStatus"
+      required:
+        - running
+        - ticker
+        - balance
+        - initialBalance
+        - openPositions
+        - totalLevels
+        - realizedPnl
+        - unrealizedPnl
+        - totalPnl
+        - fillCount
+        - fetchCount
+        - uptimeSeconds
+        - inRange
+        - fundingRate
+        - volume24h
+        - gridLow
+        - gridHigh
+        - gridCount
+        - orderSizeUsdc
+        - pollIntervalMs
+        - levels
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [BUY, SELL]
+        ticker:
+          type: string
+        price:
+          type: number
+        quantity:
+          type: number
+        pnl:
+          type: number
+          nullable: true
+        timestamp:
+          type: string
+      required:
+        - id
+        - type
+        - ticker
+        - price
+        - quantity
+        - timestamp
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
