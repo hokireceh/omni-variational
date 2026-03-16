@@ -266,4 +266,4 @@ Set `gridLow` and `gridHigh` around the current price, leaving some buffer above
 
 ## License
 
-MIT
+MIT © Hokireceh
