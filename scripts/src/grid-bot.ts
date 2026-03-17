@@ -11,6 +11,7 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 const OMNI_URL = "https://omni.variational.io";
+const STATS_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io";
 
 // ── KONFIGURASI ────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -24,24 +25,29 @@ const CONFIG = {
 };
 
 // ── CURL FETCH ─────────────────────────────────────────────────────────────
-// Browser headers persis seperti yang dipakai Chromium/Brave di Windows
+// Full Chrome 145 browser headers + Client Hints untuk bypass Cloudflare challenge
 const BROWSER_HEADERS = [
   "accept: */*",
-  "accept-encoding: gzip, deflate, br",
-  "accept-language: en-US,en;q=0.8",
+  "accept-encoding: gzip, deflate, br, zstd",
+  "accept-language: en-US,en;q=0.9,id;q=0.8",
   "origin: https://omni.variational.io",
   "referer: https://omni.variational.io/perpetual/BTC",
-  'sec-ch-ua: "Chromium";v="146", "Not-A.Brand";v="24", "Brave";v="146"',
+  'sec-ch-ua: "Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
   "sec-ch-ua-mobile: ?0",
   'sec-ch-ua-platform: "Windows"',
+  'sec-ch-ua-platform-version: "15.0.0"',
+  'sec-ch-ua-arch: "x86"',
+  'sec-ch-ua-bitness: "64"',
+  'sec-ch-ua-full-version: "145.0.0.0"',
+  'sec-ch-ua-full-version-list: "Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.0.0", "Chromium";v="145.0.0.0"',
+  'sec-ch-ua-model: ""',
   "sec-fetch-dest: empty",
   "sec-fetch-mode: cors",
   "sec-fetch-site: same-origin",
-  "sec-gpc: 1",
 ];
 
 const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
 interface CurlResponse {
   status: number;
@@ -163,32 +169,29 @@ function makeCookieStr(token: string, address: string) {
 }
 
 async function fetchPrice(
-  token: string,
-  address: string
+  _token: string,
+  _address: string
 ): Promise<{ price: number; fundingRate: string; volume: string; fundingIntervalS: number } | null> {
   try {
-    const res = await curlFetch(
-      `${OMNI_URL}/api/metadata/supported_assets?cex_asset=${CONFIG.ticker}`,
-      {
-        headers: { "vr-connected-address": address },
-        cookieStr: makeCookieStr(token, address),
-      }
-    );
+    // Gunakan omni-client-api/metadata/stats yang tidak diblok Cloudflare
+    const res = await curlFetch(`${STATS_URL}/metadata/stats`, {});
     if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-    const data = JSON.parse(res.body) as Record<string, Array<{
-      price: string;
-      funding_rate: string;
-      volume_24h: string;
-      funding_interval_s: number;
-    }>>;
-    const assets = data[CONFIG.ticker];
-    if (!assets?.length) throw new Error(`Ticker ${CONFIG.ticker} tidak ditemukan`);
-    const a = assets[0];
+    const data = JSON.parse(res.body) as {
+      listings: Array<{
+        ticker: string;
+        mark_price: string;
+        funding_rate: string;
+        volume_24h: string;
+        funding_interval_s: number;
+      }>;
+    };
+    const asset = data.listings?.find((l) => l.ticker === CONFIG.ticker);
+    if (!asset) throw new Error(`Ticker ${CONFIG.ticker} tidak ditemukan di listings`);
     return {
-      price: parseFloat(a.price),
-      fundingRate: (parseFloat(a.funding_rate) * 100).toFixed(4) + "%",
-      volume: "$" + (parseFloat(a.volume_24h) / 1_000_000).toFixed(2) + "M",
-      fundingIntervalS: a.funding_interval_s,
+      price: parseFloat(asset.mark_price),
+      fundingRate: (parseFloat(asset.funding_rate) * 100).toFixed(4) + "%",
+      volume: "$" + (parseFloat(asset.volume_24h) / 1_000_000).toFixed(2) + "M",
+      fundingIntervalS: asset.funding_interval_s,
     };
   } catch {
     return null;
