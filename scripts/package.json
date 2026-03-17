@@ -8,6 +8,9 @@
     "grid-bot": "tsx ./src/grid-bot.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "ethers": "^6.16.0"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
     "tsx": "catalog:"
