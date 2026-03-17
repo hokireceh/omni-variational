@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { BotConfigMode } from "./botConfigMode";
 
 export interface BotConfig {
   /** Asset ticker symbol */
@@ -21,4 +22,6 @@ export interface BotConfig {
   initialBalance: number;
   /** Price polling interval in milliseconds */
   pollIntervalMs: number;
+  /** Trading mode - paper (simulasi) atau live (real trading) */
+  mode: BotConfigMode;
 }

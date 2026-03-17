@@ -40,6 +40,9 @@ export const GetBotStatusResponse = zod.object({
   gridCount: zod.number(),
   orderSizeUsdc: zod.number(),
   pollIntervalMs: zod.number(),
+  mode: zod.enum(["paper", "live"]),
+  liveBalanceUsdc: zod.number().nullish(),
+  liveUpnl: zod.number().nullish(),
   levels: zod.array(
     zod.object({
       price: zod.number(),
@@ -77,6 +80,9 @@ export const StartBotResponse = zod.object({
   gridCount: zod.number(),
   orderSizeUsdc: zod.number(),
   pollIntervalMs: zod.number(),
+  mode: zod.enum(["paper", "live"]),
+  liveBalanceUsdc: zod.number().nullish(),
+  liveUpnl: zod.number().nullish(),
   levels: zod.array(
     zod.object({
       price: zod.number(),
@@ -114,6 +120,9 @@ export const StopBotResponse = zod.object({
   gridCount: zod.number(),
   orderSizeUsdc: zod.number(),
   pollIntervalMs: zod.number(),
+  mode: zod.enum(["paper", "live"]),
+  liveBalanceUsdc: zod.number().nullish(),
+  liveUpnl: zod.number().nullish(),
   levels: zod.array(
     zod.object({
       price: zod.number(),
@@ -139,6 +148,9 @@ export const GetBotConfigResponse = zod.object({
   pollIntervalMs: zod
     .number()
     .describe("Price polling interval in milliseconds"),
+  mode: zod
+    .enum(["paper", "live"])
+    .describe("Trading mode - paper (simulasi) atau live (real trading)"),
 });
 
 /**
@@ -154,6 +166,9 @@ export const UpdateBotConfigBody = zod.object({
   pollIntervalMs: zod
     .number()
     .describe("Price polling interval in milliseconds"),
+  mode: zod
+    .enum(["paper", "live"])
+    .describe("Trading mode - paper (simulasi) atau live (real trading)"),
 });
 
 export const UpdateBotConfigResponse = zod.object({
@@ -166,6 +181,9 @@ export const UpdateBotConfigResponse = zod.object({
   pollIntervalMs: zod
     .number()
     .describe("Price polling interval in milliseconds"),
+  mode: zod
+    .enum(["paper", "live"])
+    .describe("Trading mode - paper (simulasi) atau live (real trading)"),
 });
 
 /**
@@ -216,6 +234,9 @@ export const ResetBotResponse = zod.object({
   gridCount: zod.number(),
   orderSizeUsdc: zod.number(),
   pollIntervalMs: zod.number(),
+  mode: zod.enum(["paper", "live"]),
+  liveBalanceUsdc: zod.number().nullish(),
+  liveUpnl: zod.number().nullish(),
   levels: zod.array(
     zod.object({
       price: zod.number(),

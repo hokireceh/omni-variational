@@ -9,6 +9,16 @@ export interface HealthStatus {
   status: string;
 }
 
+/**
+ * Trading mode - paper (simulasi) atau live (real trading)
+ */
+export type BotConfigMode = (typeof BotConfigMode)[keyof typeof BotConfigMode];
+
+export const BotConfigMode = {
+  paper: "paper",
+  live: "live",
+} as const;
+
 export interface BotConfig {
   /** Asset ticker symbol */
   ticker: string;
@@ -24,6 +34,8 @@ export interface BotConfig {
   initialBalance: number;
   /** Price polling interval in milliseconds */
   pollIntervalMs: number;
+  /** Trading mode - paper (simulasi) atau live (real trading) */
+  mode: BotConfigMode;
 }
 
 export interface GridLevelStatus {
@@ -34,6 +46,13 @@ export interface GridLevelStatus {
   realizedPnl: number;
   tradeCount: number;
 }
+
+export type BotStatusMode = (typeof BotStatusMode)[keyof typeof BotStatusMode];
+
+export const BotStatusMode = {
+  paper: "paper",
+  live: "live",
+} as const;
 
 export interface BotStatus {
   running: boolean;
@@ -57,6 +76,9 @@ export interface BotStatus {
   gridCount: number;
   orderSizeUsdc: number;
   pollIntervalMs: number;
+  mode: BotStatusMode;
+  liveBalanceUsdc?: number | null;
+  liveUpnl?: number | null;
   levels: GridLevelStatus[];
 }
 

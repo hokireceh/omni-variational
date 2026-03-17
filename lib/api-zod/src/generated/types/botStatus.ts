@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { BotStatusMode } from "./botStatusMode";
 import type { GridLevelStatus } from "./gridLevelStatus";
 
 export interface BotStatus {
@@ -29,5 +30,8 @@ export interface BotStatus {
   gridCount: number;
   orderSizeUsdc: number;
   pollIntervalMs: number;
+  mode: BotStatusMode;
+  liveBalanceUsdc?: number | null;
+  liveUpnl?: number | null;
   levels: GridLevelStatus[];
 }

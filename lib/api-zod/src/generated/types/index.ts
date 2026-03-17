@@ -7,7 +7,9 @@
  */
 
 export * from "./botConfig";
+export * from "./botConfigMode";
 export * from "./botStatus";
+export * from "./botStatusMode";
 export * from "./errorResponse";
 export * from "./getBotTrades200";
 export * from "./getBotTradesParams";

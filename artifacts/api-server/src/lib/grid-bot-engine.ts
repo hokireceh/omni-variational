@@ -1,10 +1,10 @@
 /**
  * Grid Bot Engine — core trading logic yang jalan di server
- * Dipanggil oleh Express route handlers, state disimpan di memori
+ * Mode paper: simulasi virtual, tidak ada order nyata
+ * Mode live:  order nyata via Variational internal API
  */
 
-const BASE_URL =
-  "https://omni-client-api.prod.ap-northeast-1.variational.io";
+import { varClient } from "./variational-client.js";
 
 // ── TIPE ──────────────────────────────────────────────────────────────────
 export interface BotConfig {
@@ -15,6 +15,7 @@ export interface BotConfig {
   orderSizeUsdc: number;
   initialBalance: number;
   pollIntervalMs: number;
+  mode: "paper" | "live";
 }
 
 export interface GridLevel {
@@ -58,6 +59,9 @@ export interface BotStatusSnapshot {
   gridCount: number;
   orderSizeUsdc: number;
   pollIntervalMs: number;
+  mode: "paper" | "live";
+  liveBalanceUsdc: number | null;
+  liveUpnl: number | null;
   levels: GridLevel[];
 }
 
@@ -71,6 +75,7 @@ class GridBotEngine {
     orderSizeUsdc: 100,
     initialBalance: 5_000,
     pollIntervalMs: 5_000,
+    mode: "paper",
   };
 
   private levels: GridLevel[] = [];
@@ -91,6 +96,11 @@ class GridBotEngine {
   private volume24h = "—";
   private consecutiveErrors = 0;
 
+  // Live mode: data dari exchange
+  private liveBalanceUsdc: number | null = null;
+  private liveUpnl: number | null = null;
+  private fundingIntervalS = 28800; // default 8 jam, akan diupdate dari API
+
   // ── KONFIGURASI ─────────────────────────────────────────────────────────
   getConfig(): BotConfig {
     return { ...this.config };
@@ -99,6 +109,11 @@ class GridBotEngine {
   setConfig(newConfig: BotConfig): void {
     if (this.running) {
       throw new Error("Hentikan bot terlebih dahulu sebelum mengubah konfigurasi.");
+    }
+    if (newConfig.mode === "live" && !varClient.isConfigured()) {
+      throw new Error(
+        "Live mode butuh VR_TOKEN atau WALLET_PRIVATE_KEY di environment variable."
+      );
     }
     this.config = { ...newConfig };
   }
@@ -109,7 +124,7 @@ class GridBotEngine {
     this.levels = [];
     for (let i = 0; i <= this.config.gridCount; i++) {
       this.levels.push({
-        price: Math.round(this.config.gridLow + i * step),
+        price: parseFloat((this.config.gridLow + i * step).toFixed(6)),
         isOpen: false,
         buyPrice: 0,
         quantity: 0,
@@ -122,29 +137,11 @@ class GridBotEngine {
   // ── FETCH HARGA ──────────────────────────────────────────────────────────
   private async fetchPrice(): Promise<number | null> {
     try {
-      const res = await fetch(`${BASE_URL}/metadata/stats`, {
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(8_000),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const data = (await res.json()) as {
-        listings: Array<{
-          ticker: string;
-          mark_price: string;
-          funding_rate: string;
-          volume_24h: string;
-        }>;
-      };
-
-      const listing = data.listings?.find((l) => l.ticker === this.config.ticker);
-      if (!listing) throw new Error(`Ticker "${this.config.ticker}" tidak ditemukan`);
-
-      this.fundingRate = (parseFloat(listing.funding_rate) * 100).toFixed(4) + "%";
-      this.volume24h = "$" + (parseFloat(listing.volume_24h) / 1_000_000).toFixed(2) + "M";
-      this.consecutiveErrors = 0;
-
-      return parseFloat(listing.mark_price);
+      if (this.config.mode === "live") {
+        return await this.fetchPriceLive();
+      } else {
+        return await this.fetchPricePaper();
+      }
     } catch (err) {
       this.consecutiveErrors++;
       console.error(`[GridBot] Fetch error #${this.consecutiveErrors}:`, err);
@@ -152,8 +149,66 @@ class GridBotEngine {
     }
   }
 
+  /** Live: gunakan Variational internal API (lebih kaya data) */
+  private async fetchPriceLive(): Promise<number> {
+    const info = await varClient.getAssetInfo(this.config.ticker);
+
+    this.fundingIntervalS = info.fundingIntervalS;
+    this.fundingRate = (info.nextFundingRate * 100).toFixed(4) + "%";
+    this.volume24h = "$" + (info.volume24h / 1_000_000).toFixed(2) + "M";
+    this.consecutiveErrors = 0;
+
+    // Sync saldo dari exchange setiap 10 tick
+    if (this.fetchCount % 10 === 0) {
+      this.syncPortfolio().catch((e) =>
+        console.error("[GridBot] syncPortfolio error:", e)
+      );
+    }
+
+    return info.price;
+  }
+
+  /** Paper: gunakan public read-only API */
+  private async fetchPricePaper(): Promise<number> {
+    const BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io";
+    const res = await fetch(`${BASE_URL}/metadata/stats`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = (await res.json()) as {
+      listings: Array<{
+        ticker: string;
+        mark_price: string;
+        funding_rate: string;
+        volume_24h: string;
+      }>;
+    };
+
+    const listing = data.listings?.find((l) => l.ticker === this.config.ticker);
+    if (!listing) throw new Error(`Ticker "${this.config.ticker}" tidak ditemukan`);
+
+    this.fundingRate = (parseFloat(listing.funding_rate) * 100).toFixed(4) + "%";
+    this.volume24h = "$" + (parseFloat(listing.volume_24h) / 1_000_000).toFixed(2) + "M";
+    this.consecutiveErrors = 0;
+
+    return parseFloat(listing.mark_price);
+  }
+
+  /** Sync saldo dan upnl dari exchange (live mode) */
+  private async syncPortfolio(): Promise<void> {
+    try {
+      const portfolio = await varClient.getPortfolio();
+      this.liveBalanceUsdc = portfolio.balance;
+      this.liveUpnl = portfolio.upnl;
+    } catch (e) {
+      console.error("[GridBot] Gagal sync portfolio:", e);
+    }
+  }
+
   // ── PROSES HARGA ─────────────────────────────────────────────────────────
-  private processPrice(price: number) {
+  private async processPrice(price: number) {
     if (this.prevPrice === null) {
       this.prevPrice = price;
       return;
@@ -167,50 +222,135 @@ class GridBotEngine {
 
       // Harga turun melewati level → BUY
       if (prev > lp && curr <= lp && !level.isOpen) {
-        if (this.balance >= this.config.orderSizeUsdc) {
-          const qty = this.config.orderSizeUsdc / lp;
-          this.balance -= this.config.orderSizeUsdc;
-          level.isOpen = true;
-          level.buyPrice = lp;
-          level.quantity = qty;
-          level.tradeCount++;
-          this.fillCount++;
-          this.trades.unshift({
-            id: ++this.tradeIdCounter,
-            type: "BUY",
-            ticker: this.config.ticker,
-            price: lp,
-            quantity: qty,
-            pnl: null,
-            timestamp: new Date().toISOString(),
-          });
+        if (this.config.mode === "live") {
+          await this.executeLiveBuy(level, lp);
+        } else {
+          this.executePaperBuy(level, lp);
         }
       }
 
       // Harga naik melewati level → SELL
       if (prev < lp && curr >= lp && level.isOpen) {
-        const proceeds = level.quantity * lp;
-        const pnl = proceeds - this.config.orderSizeUsdc;
-        this.balance += proceeds;
-        level.realizedPnl += pnl;
-        level.isOpen = false;
-        level.tradeCount++;
-        this.fillCount++;
-        this.trades.unshift({
-          id: ++this.tradeIdCounter,
-          type: "SELL",
-          ticker: this.config.ticker,
-          price: lp,
-          quantity: level.quantity,
-          pnl,
-          timestamp: new Date().toISOString(),
-        });
-        level.quantity = 0;
-        level.buyPrice = 0;
+        if (this.config.mode === "live") {
+          await this.executeLiveSell(level, lp);
+        } else {
+          this.executePaperSell(level, lp);
+        }
       }
     }
 
     this.prevPrice = curr;
+  }
+
+  // ── PAPER ORDERS ─────────────────────────────────────────────────────────
+  private executePaperBuy(level: GridLevel, lp: number) {
+    if (this.balance < this.config.orderSizeUsdc) return;
+    const qty = this.config.orderSizeUsdc / lp;
+    this.balance -= this.config.orderSizeUsdc;
+    level.isOpen = true;
+    level.buyPrice = lp;
+    level.quantity = qty;
+    level.tradeCount++;
+    this.fillCount++;
+    this.trades.unshift({
+      id: ++this.tradeIdCounter,
+      type: "BUY",
+      ticker: this.config.ticker,
+      price: lp,
+      quantity: qty,
+      pnl: null,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private executePaperSell(level: GridLevel, lp: number) {
+    const proceeds = level.quantity * lp;
+    const pnl = proceeds - this.config.orderSizeUsdc;
+    this.balance += proceeds;
+    level.realizedPnl += pnl;
+    level.isOpen = false;
+    level.tradeCount++;
+    this.fillCount++;
+    this.trades.unshift({
+      id: ++this.tradeIdCounter,
+      type: "SELL",
+      ticker: this.config.ticker,
+      price: lp,
+      quantity: level.quantity,
+      pnl,
+      timestamp: new Date().toISOString(),
+    });
+    level.quantity = 0;
+    level.buyPrice = 0;
+  }
+
+  // ── LIVE ORDERS ──────────────────────────────────────────────────────────
+  private async executeLiveBuy(level: GridLevel, lp: number) {
+    const qty = this.config.orderSizeUsdc / lp;
+    console.log(`[GridBot LIVE] BUY ${qty.toFixed(6)} ${this.config.ticker} @ ${lp}`);
+
+    const result = await varClient.placeMarketOrder(
+      this.config.ticker,
+      this.fundingIntervalS,
+      "bid",
+      qty
+    );
+
+    if (result.success) {
+      level.isOpen = true;
+      level.buyPrice = lp;
+      level.quantity = qty;
+      level.tradeCount++;
+      this.fillCount++;
+      this.trades.unshift({
+        id: ++this.tradeIdCounter,
+        type: "BUY",
+        ticker: this.config.ticker,
+        price: lp,
+        quantity: qty,
+        pnl: null,
+        timestamp: new Date().toISOString(),
+      });
+      console.log(`[GridBot LIVE] BUY sukses, order_id=${result.orderId}`);
+    } else {
+      console.error(`[GridBot LIVE] BUY gagal:`, result.error);
+    }
+  }
+
+  private async executeLiveSell(level: GridLevel, lp: number) {
+    console.log(
+      `[GridBot LIVE] SELL ${level.quantity.toFixed(6)} ${this.config.ticker} @ ${lp}`
+    );
+
+    const result = await varClient.placeMarketOrder(
+      this.config.ticker,
+      this.fundingIntervalS,
+      "ask",
+      level.quantity
+    );
+
+    if (result.success) {
+      const proceeds = level.quantity * lp;
+      const pnl = proceeds - this.config.orderSizeUsdc;
+      level.realizedPnl += pnl;
+      level.isOpen = false;
+      level.tradeCount++;
+      this.fillCount++;
+      this.trades.unshift({
+        id: ++this.tradeIdCounter,
+        type: "SELL",
+        ticker: this.config.ticker,
+        price: lp,
+        quantity: level.quantity,
+        pnl,
+        timestamp: new Date().toISOString(),
+      });
+      level.quantity = 0;
+      level.buyPrice = 0;
+      console.log(`[GridBot LIVE] SELL sukses, order_id=${result.orderId}`);
+    } else {
+      console.error(`[GridBot LIVE] SELL gagal:`, result.error);
+    }
   }
 
   // ── P&L HELPERS ──────────────────────────────────────────────────────────
@@ -223,18 +363,29 @@ class GridBotEngine {
     return this.levels
       .filter((l) => l.isOpen)
       .reduce(
-        (sum, l) =>
-          sum + l.quantity * (this.currentPrice ?? 0) - this.config.orderSizeUsdc,
+        (sum, l) => sum + l.quantity * (this.currentPrice ?? 0) - this.config.orderSizeUsdc,
         0
       );
   }
 
   // ── START / STOP ──────────────────────────────────────────────────────────
-  start() {
+  async start() {
     if (this.running) return;
+
+    if (this.config.mode === "live") {
+      if (!varClient.isConfigured()) {
+        throw new Error("Live mode butuh VR_TOKEN atau WALLET_PRIVATE_KEY di .env");
+      }
+      console.log("[GridBot] Mode LIVE — order akan dikirim ke Variational");
+      // Sync portfolio awal
+      await this.syncPortfolio();
+    }
+
     this.running = true;
     this.startTime = new Date();
-    this.balance = this.config.initialBalance;
+    if (this.config.mode === "paper") {
+      this.balance = this.config.initialBalance;
+    }
     this.prevPrice = null;
     this.fetchCount = 0;
     this.fillCount = 0;
@@ -245,13 +396,15 @@ class GridBotEngine {
       const price = await this.fetchPrice();
       if (price !== null) {
         this.currentPrice = price;
-        this.processPrice(price);
+        await this.processPrice(price);
       }
     };
 
-    tick();
+    await tick();
     this.intervalHandle = setInterval(tick, this.config.pollIntervalMs);
-    console.log(`[GridBot] Started. Ticker: ${this.config.ticker}, Range: ${this.config.gridLow}-${this.config.gridHigh}`);
+    console.log(
+      `[GridBot] Started. Mode: ${this.config.mode.toUpperCase()}, Ticker: ${this.config.ticker}, Range: ${this.config.gridLow}-${this.config.gridHigh}`
+    );
   }
 
   stop() {
@@ -276,6 +429,8 @@ class GridBotEngine {
     this.fundingRate = "—";
     this.volume24h = "—";
     this.consecutiveErrors = 0;
+    this.liveBalanceUsdc = null;
+    this.liveUpnl = null;
     this.initGrid();
     console.log("[GridBot] Reset.");
   }
@@ -290,20 +445,25 @@ class GridBotEngine {
       this.currentPrice >= this.config.gridLow &&
       this.currentPrice <= this.config.gridHigh;
 
-    const uptimeSeconds = this.startTime && this.running
-      ? Math.floor((Date.now() - this.startTime.getTime()) / 1000)
-      : 0;
+    const uptimeSeconds =
+      this.startTime && this.running
+        ? Math.floor((Date.now() - this.startTime.getTime()) / 1000)
+        : 0;
 
     return {
       running: this.running,
       ticker: this.config.ticker,
       currentPrice: this.currentPrice,
-      balance: this.balance,
+      balance: this.config.mode === "live"
+        ? (this.liveBalanceUsdc ?? this.config.initialBalance)
+        : this.balance,
       initialBalance: this.config.initialBalance,
       openPositions,
       totalLevels: this.levels.length,
       realizedPnl,
-      unrealizedPnl,
+      unrealizedPnl: this.config.mode === "live"
+        ? (this.liveUpnl ?? unrealizedPnl)
+        : unrealizedPnl,
       totalPnl: realizedPnl + unrealizedPnl,
       fillCount: this.fillCount,
       fetchCount: this.fetchCount,
@@ -316,6 +476,9 @@ class GridBotEngine {
       gridCount: this.config.gridCount,
       orderSizeUsdc: this.config.orderSizeUsdc,
       pollIntervalMs: this.config.pollIntervalMs,
+      mode: this.config.mode,
+      liveBalanceUsdc: this.liveBalanceUsdc,
+      liveUpnl: this.liveUpnl,
       levels: this.levels.map((l) => ({ ...l })),
     };
   }

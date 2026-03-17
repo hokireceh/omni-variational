@@ -175,6 +175,10 @@ components:
         pollIntervalMs:
           type: integer
           description: Price polling interval in milliseconds
+        mode:
+          type: string
+          enum: [paper, live]
+          description: Trading mode - paper (simulasi) atau live (real trading)
       required:
         - ticker
         - gridLow
@@ -183,6 +187,7 @@ components:
         - orderSizeUsdc
         - initialBalance
         - pollIntervalMs
+        - mode
 
     GridLevelStatus:
       type: object
@@ -253,6 +258,15 @@ components:
           type: number
         pollIntervalMs:
           type: integer
+        mode:
+          type: string
+          enum: [paper, live]
+        liveBalanceUsdc:
+          type: number
+          nullable: true
+        liveUpnl:
+          type: number
+          nullable: true
         levels:
           type: array
           items:
@@ -278,6 +292,7 @@ components:
         - gridCount
         - orderSizeUsdc
         - pollIntervalMs
+        - mode
         - levels
 
     Trade:

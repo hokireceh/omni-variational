@@ -20,10 +20,15 @@ router.get("/bot/status", (_req, res) => {
 });
 
 // POST /bot/start
-router.post("/bot/start", (_req, res) => {
-  botEngine.start();
-  const data = StartBotResponse.parse(botEngine.getStatus());
-  res.json(data);
+router.post("/bot/start", async (_req, res) => {
+  try {
+    await botEngine.start();
+    const data = StartBotResponse.parse(botEngine.getStatus());
+    res.json(data);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
+  }
 });
 
 // POST /bot/stop
