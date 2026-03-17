@@ -2,16 +2,14 @@
  * Variational Grid Bot — Real Trading
  *
  * Auth: Sign-In with Ethereum (SIWE) via omni.variational.io
- * Trading: POST /api/orders/new/market (real orders)
- *
- * Cara kerja:
- *   - Login dulu pakai wallet (WALLET_PRIVATE_KEY)
- *   - Ambil harga real-time dari /api/metadata/supported_assets
- *   - Eksekusi BUY/SELL market order saat harga melewati level grid
+ * Transport: curl (bypass Cloudflare TLS fingerprinting)
  */
 
 import { Wallet } from "ethers";
+import { execFile } from "child_process";
+import { promisify } from "util";
 
+const execFileAsync = promisify(execFile);
 const OMNI_URL = "https://omni.variational.io";
 
 // ── KONFIGURASI ────────────────────────────────────────────────────────────
@@ -20,10 +18,90 @@ const CONFIG = {
   gridLow: 80_000,
   gridHigh: 95_000,
   gridCount: 10,
-  orderSizeUsdc: 10,    // USDC per grid level (nominal trade)
+  orderSizeUsdc: 10,
   pollIntervalMs: 5_000,
-  chainId: 42161,       // Arbitrum One
+  chainId: 42161,
 };
+
+// ── CURL FETCH ─────────────────────────────────────────────────────────────
+// Browser headers persis seperti yang dipakai Chromium/Brave di Windows
+const BROWSER_HEADERS = [
+  "accept: */*",
+  "accept-encoding: gzip, deflate, br",
+  "accept-language: en-US,en;q=0.8",
+  "origin: https://omni.variational.io",
+  "referer: https://omni.variational.io/perpetual/BTC",
+  'sec-ch-ua: "Chromium";v="146", "Not-A.Brand";v="24", "Brave";v="146"',
+  "sec-ch-ua-mobile: ?0",
+  'sec-ch-ua-platform: "Windows"',
+  "sec-fetch-dest: empty",
+  "sec-fetch-mode: cors",
+  "sec-fetch-site: same-origin",
+  "sec-gpc: 1",
+];
+
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+
+interface CurlResponse {
+  status: number;
+  body: string;
+}
+
+async function curlFetch(
+  url: string,
+  opts: {
+    method?: string;
+    body?: string;
+    headers?: Record<string, string>;
+    cookieStr?: string;
+  } = {}
+): Promise<CurlResponse> {
+  const args: string[] = [
+    "--silent",
+    "--compressed",
+    "--http2",
+    "--tlsv1.2",
+    "-w", "\n__STATUS__%{http_code}",
+    "-A", USER_AGENT,
+  ];
+
+  for (const h of BROWSER_HEADERS) {
+    args.push("-H", h);
+  }
+
+  if (opts.headers) {
+    for (const [k, v] of Object.entries(opts.headers)) {
+      args.push("-H", `${k}: ${v}`);
+    }
+  }
+
+  if (opts.cookieStr) {
+    args.push("-H", `cookie: ${opts.cookieStr}`);
+  }
+
+  if (opts.method && opts.method !== "GET") {
+    args.push("-X", opts.method);
+  }
+
+  if (opts.body) {
+    args.push("-H", "content-type: application/json");
+    args.push("--data-raw", opts.body);
+  }
+
+  args.push(url);
+
+  const { stdout } = await execFileAsync("curl", args, { maxBuffer: 10 * 1024 * 1024 });
+
+  const marker = "\n__STATUS__";
+  const idx = stdout.lastIndexOf(marker);
+  if (idx === -1) throw new Error(`curl output unexpected: ${stdout.slice(0, 200)}`);
+
+  const body = stdout.slice(0, idx);
+  const status = parseInt(stdout.slice(idx + marker.length), 10);
+
+  return { status, body };
+}
 
 // ── TIPE DATA ──────────────────────────────────────────────────────────────
 interface GridLevel {
@@ -35,90 +113,74 @@ interface GridLevel {
   tradeCount: number;
 }
 
-interface SupportedAsset {
-  asset: string;
-  price: string;
-  funding_rate: string;
-  volume_24h: string;
-  index_price: string;
-}
-
 interface Position {
-  position_info: {
-    instrument: { underlying: string; instrument_type: string };
-    qty: string;
-    avg_entry_price: string;
-  };
-  upnl: string;
-  value: string;
+  underlying: string;
+  qty: number;
+  side: "long" | "short";
+  avgEntryPrice: number;
+  markPrice: number;
+  upnl: number;
 }
 
 // ── AUTH ────────────────────────────────────────────────────────────────────
-async function login(wallet: Wallet): Promise<string> {
+async function login(wallet: Wallet): Promise<{ token: string; address: string }> {
   const address = await wallet.getAddress();
 
   // Step 1: generate signing data
-  const sigRes = await fetch(`${OMNI_URL}/api/auth/generate_signing_data`, {
+  const sigRes = await curlFetch(`${OMNI_URL}/api/auth/generate_signing_data`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "vr-connected-address": address,
-    },
     body: JSON.stringify({ address }),
+    headers: { "vr-connected-address": address },
   });
 
-  if (!sigRes.ok) {
-    throw new Error(`generate_signing_data gagal: ${sigRes.status} ${await sigRes.text()}`);
+  if (sigRes.status !== 200) {
+    throw new Error(`generate_signing_data gagal: ${sigRes.status}\n${sigRes.body.slice(0, 300)}`);
   }
 
-  const message = await sigRes.text();
+  const siweMessage = sigRes.body.trim();
 
   // Step 2: sign message
-  const signature = await wallet.signMessage(message);
+  const signature = await wallet.signMessage(siweMessage);
 
   // Step 3: login
-  const loginRes = await fetch(`${OMNI_URL}/api/auth/login`, {
+  const loginRes = await curlFetch(`${OMNI_URL}/api/auth/login`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "vr-connected-address": address,
-    },
-    body: JSON.stringify({ message, signature }),
+    body: JSON.stringify({ message: siweMessage, signature }),
+    headers: { "vr-connected-address": address },
   });
 
-  if (!loginRes.ok) {
-    throw new Error(`Login gagal: ${loginRes.status} ${await loginRes.text()}`);
+  if (loginRes.status !== 200) {
+    throw new Error(`Login gagal: ${loginRes.status}\n${loginRes.body.slice(0, 300)}`);
   }
 
-  const data = await loginRes.json() as { token: string };
-  return data.token;
+  const data = JSON.parse(loginRes.body) as { token: string };
+  return { token: data.token, address };
 }
 
-// ── API CLIENT ──────────────────────────────────────────────────────────────
-function makeHeaders(token: string, address: string) {
-  return {
-    "content-type": "application/json",
-    "accept": "application/json",
-    "cookie": `vr-token=${token}; vr-connected-address=${address.toLowerCase()}`,
-    "vr-connected-address": address,
-  };
+// ── API HELPERS ─────────────────────────────────────────────────────────────
+function makeCookieStr(token: string, address: string) {
+  return `vr-token=${token}; vr-connected-address=${address.toLowerCase()}`;
 }
 
-async function fetchPrice(token: string, address: string): Promise<{
-  price: number;
-  fundingRate: string;
-  volume: string;
-} | null> {
+async function fetchPrice(
+  token: string,
+  address: string
+): Promise<{ price: number; fundingRate: string; volume: string; fundingIntervalS: number } | null> {
   try {
-    const res = await fetch(
+    const res = await curlFetch(
       `${OMNI_URL}/api/metadata/supported_assets?cex_asset=${CONFIG.ticker}`,
       {
-        headers: makeHeaders(token, address),
-        signal: AbortSignal.timeout(8_000),
+        headers: { "vr-connected-address": address },
+        cookieStr: makeCookieStr(token, address),
       }
     );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json() as Record<string, SupportedAsset[]>;
+    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+    const data = JSON.parse(res.body) as Record<string, Array<{
+      price: string;
+      funding_rate: string;
+      volume_24h: string;
+      funding_interval_s: number;
+    }>>;
     const assets = data[CONFIG.ticker];
     if (!assets?.length) throw new Error(`Ticker ${CONFIG.ticker} tidak ditemukan`);
     const a = assets[0];
@@ -126,20 +188,40 @@ async function fetchPrice(token: string, address: string): Promise<{
       price: parseFloat(a.price),
       fundingRate: (parseFloat(a.funding_rate) * 100).toFixed(4) + "%",
       volume: "$" + (parseFloat(a.volume_24h) / 1_000_000).toFixed(2) + "M",
+      fundingIntervalS: a.funding_interval_s,
     };
-  } catch (err) {
+  } catch {
     return null;
   }
 }
 
 async function fetchPositions(token: string, address: string): Promise<Position[]> {
   try {
-    const res = await fetch(`${OMNI_URL}/api/positions`, {
-      headers: makeHeaders(token, address),
-      signal: AbortSignal.timeout(8_000),
+    const res = await curlFetch(`${OMNI_URL}/api/positions`, {
+      headers: { "vr-connected-address": address },
+      cookieStr: makeCookieStr(token, address),
     });
-    if (!res.ok) return [];
-    return await res.json() as Position[];
+    if (res.status !== 200) return [];
+    const data = JSON.parse(res.body) as Array<{
+      position_info: {
+        instrument: { underlying: string };
+        qty: string;
+        avg_entry_price: string;
+      };
+      price_info: { price: string };
+      upnl: string;
+    }>;
+    return data.map((p) => {
+      const qty = parseFloat(p.position_info.qty);
+      return {
+        underlying: p.position_info.instrument.underlying,
+        qty: Math.abs(qty),
+        side: qty >= 0 ? "long" : "short",
+        avgEntryPrice: parseFloat(p.position_info.avg_entry_price),
+        markPrice: parseFloat(p.price_info.price),
+        upnl: parseFloat(p.upnl),
+      };
+    });
   } catch {
     return [];
   }
@@ -148,39 +230,57 @@ async function fetchPositions(token: string, address: string): Promise<Position[
 async function placeMarketOrder(
   token: string,
   address: string,
-  side: "buy" | "sell",
-  qty: number
+  side: "bid" | "ask",
+  qty: number,
+  fundingIntervalS: number
 ): Promise<boolean> {
+  const instrument = {
+    instrument_type: "perpetual_future",
+    underlying: CONFIG.ticker,
+    funding_interval_s: fundingIntervalS,
+    settlement_asset: "USDC",
+  };
+
   try {
-    const instrument = {
-      instrument_type: "perpetual_future",
-      underlying: CONFIG.ticker,
-      funding_interval_s: 3600,
-      settlement_asset: "USDC",
-    };
-
-    const body = {
-      instrument,
-      side,
-      qty: qty.toFixed(8),
-    };
-
-    const res = await fetch(`${OMNI_URL}/api/orders/new/market`, {
+    // Step 1: dapatkan quote
+    const quoteRes = await curlFetch(`${OMNI_URL}/api/quotes/indicative`, {
       method: "POST",
-      headers: makeHeaders(token, address),
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({ instrument, side, qty: qty.toString() }),
+      headers: { "vr-connected-address": address },
+      cookieStr: makeCookieStr(token, address),
     });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      process.stdout.write(`[ORDER ERROR] ${res.status}: ${errText}\n`);
+    if (quoteRes.status !== 200) {
+      process.stdout.write(`[ORDER] Quote gagal ${quoteRes.status}: ${quoteRes.body.slice(0, 200)}\n`);
+      return false;
+    }
+
+    const quote = JSON.parse(quoteRes.body) as { quote_id: string };
+    if (!quote.quote_id) {
+      process.stdout.write(`[ORDER] quote_id kosong\n`);
+      return false;
+    }
+
+    // Step 2: submit market order
+    const orderRes = await curlFetch(`${OMNI_URL}/api/orders/new/market`, {
+      method: "POST",
+      body: JSON.stringify({
+        rfq_id: quote.quote_id,
+        take_profit_rfq_id: null,
+        stop_loss_rfq_id: null,
+      }),
+      headers: { "vr-connected-address": address },
+      cookieStr: makeCookieStr(token, address),
+    });
+
+    if (orderRes.status !== 200) {
+      process.stdout.write(`[ORDER] Submit gagal ${orderRes.status}: ${orderRes.body.slice(0, 200)}\n`);
       return false;
     }
 
     return true;
   } catch (err) {
-    process.stdout.write(`[ORDER ERROR] ${err}\n`);
+    process.stdout.write(`[ORDER] Error: ${err}\n`);
     return false;
   }
 }
@@ -196,15 +296,14 @@ class GridBot {
   private readonly startTime = new Date();
   private lastFundingRate = "—";
   private lastVolume24h = "—";
+  private lastFundingIntervalS = 3600;
   private consecutiveErrors = 0;
   private positions: Position[] = [];
 
-  private token: string;
-  private address: string;
-
-  constructor(token: string, address: string) {
-    this.token = token;
-    this.address = address;
+  constructor(
+    private readonly token: string,
+    private readonly address: string
+  ) {
     this.step = (CONFIG.gridHigh - CONFIG.gridLow) / CONFIG.gridCount;
     this.initGrid();
   }
@@ -229,16 +328,15 @@ class GridBot {
     }
 
     const prev = this.prevPrice;
-    const curr = price;
 
     for (const level of this.levels) {
       const lp = level.price;
 
-      // Harga turun melewati level → BUY
-      if (prev > lp && curr <= lp && !level.isOpen) {
+      // Harga turun melewati level → BUY (bid)
+      if (prev > lp && price <= lp && !level.isOpen) {
         const qty = CONFIG.orderSizeUsdc / lp;
-        this.logRaw(`▼ BUY  ${CONFIG.ticker} ${qty.toFixed(6)} @ $${lp.toLocaleString()} — sending market order...`);
-        const ok = await placeMarketOrder(this.token, this.address, "buy", qty);
+        this.logRaw(`▼ BUY  ${qty.toFixed(6)} ${CONFIG.ticker} @ $${lp.toLocaleString()} → sending order...`);
+        const ok = await placeMarketOrder(this.token, this.address, "bid", qty, this.lastFundingIntervalS);
         if (ok) {
           level.isOpen = true;
           level.buyPrice = lp;
@@ -251,12 +349,12 @@ class GridBot {
         }
       }
 
-      // Harga naik melewati level → SELL
-      if (prev < lp && curr >= lp && level.isOpen) {
+      // Harga naik melewati level → SELL (ask)
+      if (prev < lp && price >= lp && level.isOpen) {
         const qty = level.quantity;
         const pnl = qty * (lp - level.buyPrice);
-        this.logRaw(`▲ SELL ${CONFIG.ticker} ${qty.toFixed(6)} @ $${lp.toLocaleString()} | est. PnL: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} — sending market order...`);
-        const ok = await placeMarketOrder(this.token, this.address, "sell", qty);
+        this.logRaw(`▲ SELL ${qty.toFixed(6)} ${CONFIG.ticker} @ $${lp.toLocaleString()} | est. PnL: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)} → sending order...`);
+        const ok = await placeMarketOrder(this.token, this.address, "ask", qty, this.lastFundingIntervalS);
         if (ok) {
           level.realizedPnl += pnl;
           level.isOpen = false;
@@ -269,7 +367,7 @@ class GridBot {
       }
     }
 
-    this.prevPrice = curr;
+    this.prevPrice = price;
   }
 
   private get totalRealizedPnl() {
@@ -286,20 +384,16 @@ class GridBot {
     const m = Math.floor((uptime % 3600) / 60);
     const s = uptime % 60;
     const uptimeStr = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-
     const inRange = price >= CONFIG.gridLow && price <= CONFIG.gridHigh;
     const rangeStatus = inRange ? "✅ DALAM RANGE" : "⚠️  DI LUAR RANGE";
-    const totalPnl = this.totalRealizedPnl;
-
     const W = 64;
     const line = "═".repeat(W);
     const dash = "─".repeat(W);
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
 
-    // Hitung total uPnL dari posisi real
     const realUpnl = this.positions
-      .filter(p => p.position_info.instrument.underlying === CONFIG.ticker)
-      .reduce((sum, p) => sum + parseFloat(p.upnl), 0);
+      .filter((p) => p.underlying === CONFIG.ticker)
+      .reduce((sum, p) => sum + p.upnl, 0);
 
     console.clear();
     console.log(line);
@@ -315,7 +409,7 @@ class GridBot {
     console.log(`  Wallet       : ${this.address.slice(0, 10)}...${this.address.slice(-6)}`);
     console.log(`  Grid Orders  : ${this.openPositionCount} posisi terbuka`);
     console.log(`  uPnL (real)  : ${realUpnl >= 0 ? "+" : ""}$${realUpnl.toFixed(4)}`);
-    console.log(`  Realized     : ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(4)}`);
+    console.log(`  Realized     : ${this.totalRealizedPnl >= 0 ? "+" : ""}$${this.totalRealizedPnl.toFixed(4)}`);
     console.log(dash);
     console.log(`  Uptime       : ${uptimeStr}`);
     console.log(`  API Calls    : ${this.fetchCount}`);
@@ -324,7 +418,6 @@ class GridBot {
     console.log(`  Waktu        : ${now} UTC`);
     console.log(line);
 
-    // Level grid terdekat
     console.log("\n  LEVEL GRID (5 terdekat dengan harga):");
     const sorted = [...this.levels]
       .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price))
@@ -333,23 +426,24 @@ class GridBot {
     for (const l of sorted) {
       const dot = l.isOpen ? "●" : "○";
       const arrow = l.price > price ? "▲" : "▼";
-      const diff = ((l.price - price) / price * 100).toFixed(2);
+      const diff = (((l.price - price) / price) * 100).toFixed(2);
       const openStr = l.isOpen ? ` [OPEN @ $${l.buyPrice.toLocaleString()}]` : "";
-      const pnlStr = l.realizedPnl !== 0 ? ` | realized: ${l.realizedPnl >= 0 ? "+" : ""}$${l.realizedPnl.toFixed(2)}` : "";
-      console.log(`  ${dot} $${String(l.price.toLocaleString()).padEnd(10)} ${arrow} ${diff.padStart(6)}%${openStr}${pnlStr}`);
+      const pnlStr =
+        l.realizedPnl !== 0
+          ? ` | realized: ${l.realizedPnl >= 0 ? "+" : ""}$${l.realizedPnl.toFixed(4)}`
+          : "";
+      console.log(
+        `  ${dot} $${String(l.price.toLocaleString()).padEnd(10)} ${arrow} ${diff.padStart(6)}%${openStr}${pnlStr}`
+      );
     }
 
-    // Posisi real dari exchange
-    const relevantPos = this.positions.filter(
-      p => p.position_info.instrument.underlying === CONFIG.ticker
-    );
+    const relevantPos = this.positions.filter((p) => p.underlying === CONFIG.ticker);
     if (relevantPos.length > 0) {
       console.log(`\n  POSISI REAL (${CONFIG.ticker}):`);
       for (const p of relevantPos) {
-        const qty = parseFloat(p.position_info.qty);
-        const entry = parseFloat(p.position_info.avg_entry_price);
-        const upnl = parseFloat(p.upnl);
-        console.log(`    qty: ${qty.toFixed(6)} | entry: $${entry.toFixed(2)} | uPnL: ${upnl >= 0 ? "+" : ""}$${upnl.toFixed(4)}`);
+        console.log(
+          `    ${p.side.toUpperCase()} ${p.qty.toFixed(6)} | entry: $${p.avgEntryPrice.toFixed(2)} | mark: $${p.markPrice.toFixed(2)} | uPnL: ${p.upnl >= 0 ? "+" : ""}$${p.upnl.toFixed(4)}`
+        );
       }
     }
 
@@ -368,7 +462,7 @@ class GridBot {
   async start() {
     const W = 64;
     console.log("═".repeat(W));
-    console.log("  VARIATIONAL GRID BOT — Real Trading Mode");
+    console.log("  VARIATIONAL GRID BOT — Real Trading (curl transport)");
     console.log("═".repeat(W));
     console.log(`  Wallet  : ${this.address}`);
     console.log(`  Ticker  : ${CONFIG.ticker}`);
@@ -386,9 +480,9 @@ class GridBot {
       if (result) {
         this.lastFundingRate = result.fundingRate;
         this.lastVolume24h = result.volume;
+        this.lastFundingIntervalS = result.fundingIntervalS;
         this.consecutiveErrors = 0;
         await this.processPrice(result.price);
-        // Fetch posisi tiap 3 tick
         if (this.fetchCount % 3 === 0) {
           this.positions = await fetchPositions(this.token, this.address);
         }
@@ -416,24 +510,40 @@ class GridBot {
 // ── ENTRY POINT ────────────────────────────────────────────────────────────
 async function main() {
   const privateKey = process.env["WALLET_PRIVATE_KEY"];
+  const vrToken = process.env["VR_TOKEN"];
+
   if (!privateKey) {
     console.error("ERROR: WALLET_PRIVATE_KEY tidak diset di environment secrets.");
     process.exit(1);
   }
 
-  const wallet = new Wallet(privateKey);
+  const wallet = new Wallet(privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`);
   const address = await wallet.getAddress();
 
-  console.log(`Wallet: ${address}`);
-  console.log("Login ke Variational...");
+  console.log(`Wallet   : ${address}`);
+  console.log(`Transport: curl (browser headers + TLS)`);
 
   let token: string;
-  try {
-    token = await login(wallet);
-    console.log("Login berhasil!\n");
-  } catch (err) {
-    console.error(`Login gagal: ${err}`);
-    process.exit(1);
+
+  // Mode 1: pakai VR_TOKEN langsung dari env (bypass Cloudflare CF challenge)
+  if (vrToken) {
+    token = vrToken;
+    console.log("✅ VR_TOKEN dari env digunakan (skip SIWE login)\n");
+  } else {
+    // Mode 2: SIWE login (mungkin diblok Cloudflare managed challenge)
+    console.log("Login via SIWE...\n");
+    try {
+      const result = await login(wallet);
+      token = result.token;
+      console.log("✅ Login berhasil!\n");
+    } catch (err) {
+      console.error(`❌ Login gagal (Cloudflare block): ${err}`);
+      console.error("");
+      console.error("  → Solusi: set secret VR_TOKEN dengan nilai cookie 'vr-token'");
+      console.error("    dari browser kamu di omni.variational.io");
+      console.error("    (DevTools → Application → Cookies → vr-token)");
+      process.exit(1);
+    }
   }
 
   const bot = new GridBot(token, address);
