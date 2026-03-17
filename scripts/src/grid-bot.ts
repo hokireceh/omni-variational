@@ -1,69 +1,210 @@
 /**
- * Variational Grid Bot — Paper Trading Simulation
+ * Variational Grid Bot — Real Trading
  *
- * Menggunakan Read-Only API Variational untuk harga real-time.
- * Trading API belum tersedia → ini adalah simulasi (paper trading).
+ * Auth: Sign-In with Ethereum (SIWE) via omni.variational.io
+ * Trading: POST /api/orders/new/market (real orders)
  *
- * Cara kerja grid bot:
- *   - Bagi rentang harga [LOW, HIGH] jadi N level
- *   - Tiap level punya order BUY (kalau harga turun melewati level) dan
- *     SELL (kalau harga naik melewati level)
- *   - Profit dari selisih harga antar grid
+ * Cara kerja:
+ *   - Login dulu pakai wallet (WALLET_PRIVATE_KEY)
+ *   - Ambil harga real-time dari /api/metadata/supported_assets
+ *   - Eksekusi BUY/SELL market order saat harga melewati level grid
  */
 
-const BASE_URL =
-  "https://omni-client-api.prod.ap-northeast-1.variational.io";
+import { Wallet } from "ethers";
+
+const OMNI_URL = "https://omni.variational.io";
 
 // ── KONFIGURASI ────────────────────────────────────────────────────────────
 const CONFIG = {
-  ticker: "BTC",         // Ticker aset (harus terdaftar di Variational)
-  gridLow: 85_000,       // Batas bawah rentang harga (USDC)
-  gridHigh: 100_000,     // Batas atas rentang harga (USDC)
-  gridCount: 10,         // Jumlah level grid
-  orderSizeUsdc: 100,    // Ukuran order tiap level (USDC)
-  initialBalance: 5_000, // Saldo awal paper trading (USDC)
-  pollIntervalMs: 5_000, // Interval cek harga (ms) — maks 10 req/10s
+  ticker: "BTC",
+  gridLow: 80_000,
+  gridHigh: 95_000,
+  gridCount: 10,
+  orderSizeUsdc: 10,    // USDC per grid level (nominal trade)
+  pollIntervalMs: 5_000,
+  chainId: 42161,       // Arbitrum One
 };
 
 // ── TIPE DATA ──────────────────────────────────────────────────────────────
 interface GridLevel {
   price: number;
-  isOpen: boolean;   // true = kita punya posisi di level ini
+  isOpen: boolean;
   buyPrice: number;
   quantity: number;
   realizedPnl: number;
   tradeCount: number;
 }
 
-interface VariationalStats {
-  listings: Array<{
-    ticker: string;
-    mark_price: string;
-    volume_24h: string;
-    funding_rate: string;
-  }>;
-  total_volume_24h: string;
-  tvl: string;
-  num_markets: number;
+interface SupportedAsset {
+  asset: string;
+  price: string;
+  funding_rate: string;
+  volume_24h: string;
+  index_price: string;
+}
+
+interface Position {
+  position_info: {
+    instrument: { underlying: string; instrument_type: string };
+    qty: string;
+    avg_entry_price: string;
+  };
+  upnl: string;
+  value: string;
+}
+
+// ── AUTH ────────────────────────────────────────────────────────────────────
+async function login(wallet: Wallet): Promise<string> {
+  const address = await wallet.getAddress();
+
+  // Step 1: generate signing data
+  const sigRes = await fetch(`${OMNI_URL}/api/auth/generate_signing_data`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "vr-connected-address": address,
+    },
+    body: JSON.stringify({ address }),
+  });
+
+  if (!sigRes.ok) {
+    throw new Error(`generate_signing_data gagal: ${sigRes.status} ${await sigRes.text()}`);
+  }
+
+  const message = await sigRes.text();
+
+  // Step 2: sign message
+  const signature = await wallet.signMessage(message);
+
+  // Step 3: login
+  const loginRes = await fetch(`${OMNI_URL}/api/auth/login`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "vr-connected-address": address,
+    },
+    body: JSON.stringify({ message, signature }),
+  });
+
+  if (!loginRes.ok) {
+    throw new Error(`Login gagal: ${loginRes.status} ${await loginRes.text()}`);
+  }
+
+  const data = await loginRes.json() as { token: string };
+  return data.token;
+}
+
+// ── API CLIENT ──────────────────────────────────────────────────────────────
+function makeHeaders(token: string, address: string) {
+  return {
+    "content-type": "application/json",
+    "accept": "application/json",
+    "cookie": `vr-token=${token}; vr-connected-address=${address.toLowerCase()}`,
+    "vr-connected-address": address,
+  };
+}
+
+async function fetchPrice(token: string, address: string): Promise<{
+  price: number;
+  fundingRate: string;
+  volume: string;
+} | null> {
+  try {
+    const res = await fetch(
+      `${OMNI_URL}/api/metadata/supported_assets?cex_asset=${CONFIG.ticker}`,
+      {
+        headers: makeHeaders(token, address),
+        signal: AbortSignal.timeout(8_000),
+      }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json() as Record<string, SupportedAsset[]>;
+    const assets = data[CONFIG.ticker];
+    if (!assets?.length) throw new Error(`Ticker ${CONFIG.ticker} tidak ditemukan`);
+    const a = assets[0];
+    return {
+      price: parseFloat(a.price),
+      fundingRate: (parseFloat(a.funding_rate) * 100).toFixed(4) + "%",
+      volume: "$" + (parseFloat(a.volume_24h) / 1_000_000).toFixed(2) + "M",
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+async function fetchPositions(token: string, address: string): Promise<Position[]> {
+  try {
+    const res = await fetch(`${OMNI_URL}/api/positions`, {
+      headers: makeHeaders(token, address),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return [];
+    return await res.json() as Position[];
+  } catch {
+    return [];
+  }
+}
+
+async function placeMarketOrder(
+  token: string,
+  address: string,
+  side: "buy" | "sell",
+  qty: number
+): Promise<boolean> {
+  try {
+    const instrument = {
+      instrument_type: "perpetual_future",
+      underlying: CONFIG.ticker,
+      funding_interval_s: 3600,
+      settlement_asset: "USDC",
+    };
+
+    const body = {
+      instrument,
+      side,
+      qty: qty.toFixed(8),
+    };
+
+    const res = await fetch(`${OMNI_URL}/api/orders/new/market`, {
+      method: "POST",
+      headers: makeHeaders(token, address),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      process.stdout.write(`[ORDER ERROR] ${res.status}: ${errText}\n`);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    process.stdout.write(`[ORDER ERROR] ${err}\n`);
+    return false;
+  }
 }
 
 // ── GRID BOT ───────────────────────────────────────────────────────────────
 class GridBot {
   private levels: GridLevel[] = [];
-  private balance: number;
   private prevPrice: number | null = null;
   private readonly step: number;
 
   private fetchCount = 0;
   private fillCount = 0;
   private readonly startTime = new Date();
-  private lastPrice = 0;
   private lastFundingRate = "—";
   private lastVolume24h = "—";
   private consecutiveErrors = 0;
+  private positions: Position[] = [];
 
-  constructor() {
-    this.balance = CONFIG.initialBalance;
+  private token: string;
+  private address: string;
+
+  constructor(token: string, address: string) {
+    this.token = token;
+    this.address = address;
     this.step = (CONFIG.gridHigh - CONFIG.gridLow) / CONFIG.gridCount;
     this.initGrid();
   }
@@ -81,49 +222,7 @@ class GridBot {
     }
   }
 
-  // ── FETCH HARGA ──────────────────────────────────────────────────────────
-  private async fetchPrice(): Promise<number | null> {
-    try {
-      const res = await fetch(`${BASE_URL}/metadata/stats`, {
-        headers: { "Accept": "application/json" },
-        signal: AbortSignal.timeout(8_000),
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      }
-
-      const data = (await res.json()) as VariationalStats;
-      const listing = data.listings?.find(
-        (l) => l.ticker === CONFIG.ticker
-      );
-
-      if (!listing) {
-        throw new Error(
-          `Ticker "${CONFIG.ticker}" tidak ditemukan. Cek CONFIG.ticker.`
-        );
-      }
-
-      this.lastFundingRate = (
-        parseFloat(listing.funding_rate) * 100
-      ).toFixed(4) + "%";
-      this.lastVolume24h = "$" + (
-        parseFloat(listing.volume_24h) / 1_000_000
-      ).toFixed(2) + "M";
-
-      this.consecutiveErrors = 0;
-      return parseFloat(listing.mark_price);
-    } catch (err) {
-      this.consecutiveErrors++;
-      this.logRaw(
-        `[ERROR #${this.consecutiveErrors}] Gagal fetch harga: ${err}`
-      );
-      return null;
-    }
-  }
-
-  // ── LOGIKA GRID ──────────────────────────────────────────────────────────
-  private processPrice(price: number) {
+  private async processPrice(price: number) {
     if (this.prevPrice === null) {
       this.prevPrice = price;
       return;
@@ -137,43 +236,42 @@ class GridBot {
 
       // Harga turun melewati level → BUY
       if (prev > lp && curr <= lp && !level.isOpen) {
-        if (this.balance >= CONFIG.orderSizeUsdc) {
-          const qty = CONFIG.orderSizeUsdc / lp;
-          this.balance -= CONFIG.orderSizeUsdc;
+        const qty = CONFIG.orderSizeUsdc / lp;
+        this.logRaw(`▼ BUY  ${CONFIG.ticker} ${qty.toFixed(6)} @ $${lp.toLocaleString()} — sending market order...`);
+        const ok = await placeMarketOrder(this.token, this.address, "buy", qty);
+        if (ok) {
           level.isOpen = true;
           level.buyPrice = lp;
           level.quantity = qty;
           level.tradeCount++;
           this.fillCount++;
-          this.logRaw(
-            `▼ BUY  ${CONFIG.ticker} ${qty.toFixed(6)} @ $${lp.toLocaleString()} | Saldo: $${this.balance.toFixed(2)}`
-          );
+          this.logRaw(`  ✅ BUY filled`);
         } else {
-          this.logRaw(
-            `[SKIP] BUY @ $${lp.toLocaleString()} — saldo tidak cukup`
-          );
+          this.logRaw(`  ❌ BUY gagal`);
         }
       }
 
       // Harga naik melewati level → SELL
       if (prev < lp && curr >= lp && level.isOpen) {
-        const proceeds = level.quantity * lp;
-        const pnl = proceeds - CONFIG.orderSizeUsdc;
-        this.balance += proceeds;
-        level.realizedPnl += pnl;
-        level.isOpen = false;
-        level.tradeCount++;
-        this.fillCount++;
-        this.logRaw(
-          `▲ SELL ${CONFIG.ticker} qty @ $${lp.toLocaleString()} | PnL: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} | Saldo: $${this.balance.toFixed(2)}`
-        );
+        const qty = level.quantity;
+        const pnl = qty * (lp - level.buyPrice);
+        this.logRaw(`▲ SELL ${CONFIG.ticker} ${qty.toFixed(6)} @ $${lp.toLocaleString()} | est. PnL: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} — sending market order...`);
+        const ok = await placeMarketOrder(this.token, this.address, "sell", qty);
+        if (ok) {
+          level.realizedPnl += pnl;
+          level.isOpen = false;
+          level.tradeCount++;
+          this.fillCount++;
+          this.logRaw(`  ✅ SELL filled`);
+        } else {
+          this.logRaw(`  ❌ SELL gagal`);
+        }
       }
     }
 
     this.prevPrice = curr;
   }
 
-  // ── KALKULASI P&L ────────────────────────────────────────────────────────
   private get totalRealizedPnl() {
     return this.levels.reduce((s, l) => s + l.realizedPnl, 0);
   }
@@ -182,18 +280,6 @@ class GridBot {
     return this.levels.filter((l) => l.isOpen).length;
   }
 
-  private get unrealizedPnl() {
-    if (!this.prevPrice) return 0;
-    return this.levels
-      .filter((l) => l.isOpen)
-      .reduce(
-        (sum, l) =>
-          sum + l.quantity * (this.prevPrice ?? 0) - CONFIG.orderSizeUsdc,
-        0
-      );
-  }
-
-  // ── DASHBOARD ────────────────────────────────────────────────────────────
   private displayDashboard(price: number) {
     const uptime = Math.floor((Date.now() - this.startTime.getTime()) / 1000);
     const h = Math.floor(uptime / 3600);
@@ -203,49 +289,33 @@ class GridBot {
 
     const inRange = price >= CONFIG.gridLow && price <= CONFIG.gridHigh;
     const rangeStatus = inRange ? "✅ DALAM RANGE" : "⚠️  DI LUAR RANGE";
-    const totalPnl = this.totalRealizedPnl + this.unrealizedPnl;
-    const pnlColor = totalPnl >= 0 ? "+" : "";
+    const totalPnl = this.totalRealizedPnl;
 
-    const W = 62;
+    const W = 64;
     const line = "═".repeat(W);
     const dash = "─".repeat(W);
-
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+
+    // Hitung total uPnL dari posisi real
+    const realUpnl = this.positions
+      .filter(p => p.position_info.instrument.underlying === CONFIG.ticker)
+      .reduce((sum, p) => sum + parseFloat(p.upnl), 0);
 
     console.clear();
     console.log(line);
-    console.log(
-      `  VARIATIONAL GRID BOT  [Paper Trading]  ${rangeStatus}`
-    );
+    console.log(`  VARIATIONAL GRID BOT  [REAL TRADING]  ${rangeStatus}`);
     console.log(line);
     console.log(`  Aset         : ${CONFIG.ticker}`);
-    console.log(
-      `  Harga        : $${price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    );
-    console.log(
-      `  Range Grid   : $${CONFIG.gridLow.toLocaleString()} — $${CONFIG.gridHigh.toLocaleString()}`
-    );
-    console.log(
-      `  Step         : $${this.step.toLocaleString()} (${CONFIG.gridCount} level)`
-    );
+    console.log(`  Harga        : $${price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+    console.log(`  Range Grid   : $${CONFIG.gridLow.toLocaleString()} — $${CONFIG.gridHigh.toLocaleString()}`);
+    console.log(`  Step         : $${this.step.toLocaleString()} (${CONFIG.gridCount} level)`);
     console.log(`  Funding Rate : ${this.lastFundingRate}`);
     console.log(`  Volume 24h   : ${this.lastVolume24h}`);
     console.log(dash);
-    console.log(
-      `  Saldo USDC   : $${this.balance.toFixed(2)}`
-    );
-    console.log(
-      `  Posisi Buka  : ${this.openPositionCount} / ${this.levels.length} level`
-    );
-    console.log(
-      `  Unrealized   : ${this.unrealizedPnl >= 0 ? "+" : ""}$${this.unrealizedPnl.toFixed(2)}`
-    );
-    console.log(
-      `  Realized     : ${this.totalRealizedPnl >= 0 ? "+" : ""}$${this.totalRealizedPnl.toFixed(2)}`
-    );
-    console.log(
-      `  Total P&L    : ${pnlColor}$${totalPnl.toFixed(2)}`
-    );
+    console.log(`  Wallet       : ${this.address.slice(0, 10)}...${this.address.slice(-6)}`);
+    console.log(`  Grid Orders  : ${this.openPositionCount} posisi terbuka`);
+    console.log(`  uPnL (real)  : ${realUpnl >= 0 ? "+" : ""}$${realUpnl.toFixed(4)}`);
+    console.log(`  Realized     : ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(4)}`);
     console.log(dash);
     console.log(`  Uptime       : ${uptimeStr}`);
     console.log(`  API Calls    : ${this.fetchCount}`);
@@ -254,7 +324,7 @@ class GridBot {
     console.log(`  Waktu        : ${now} UTC`);
     console.log(line);
 
-    // Tampilkan level grid terdekat dengan harga saat ini
+    // Level grid terdekat
     console.log("\n  LEVEL GRID (5 terdekat dengan harga):");
     const sorted = [...this.levels]
       .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price))
@@ -264,92 +334,113 @@ class GridBot {
       const dot = l.isOpen ? "●" : "○";
       const arrow = l.price > price ? "▲" : "▼";
       const diff = ((l.price - price) / price * 100).toFixed(2);
-      const pnlStr =
-        l.realizedPnl !== 0
-          ? ` | realized: ${l.realizedPnl >= 0 ? "+" : ""}$${l.realizedPnl.toFixed(2)}`
-          : "";
-      const openStr = l.isOpen
-        ? ` [OPEN @ $${l.buyPrice.toLocaleString()}]`
-        : "";
-      console.log(
-        `  ${dot} $${String(l.price.toLocaleString()).padEnd(10)} ${arrow} ${diff.padStart(6)}%${openStr}${pnlStr}`
-      );
+      const openStr = l.isOpen ? ` [OPEN @ $${l.buyPrice.toLocaleString()}]` : "";
+      const pnlStr = l.realizedPnl !== 0 ? ` | realized: ${l.realizedPnl >= 0 ? "+" : ""}$${l.realizedPnl.toFixed(2)}` : "";
+      console.log(`  ${dot} $${String(l.price.toLocaleString()).padEnd(10)} ${arrow} ${diff.padStart(6)}%${openStr}${pnlStr}`);
+    }
+
+    // Posisi real dari exchange
+    const relevantPos = this.positions.filter(
+      p => p.position_info.instrument.underlying === CONFIG.ticker
+    );
+    if (relevantPos.length > 0) {
+      console.log(`\n  POSISI REAL (${CONFIG.ticker}):`);
+      for (const p of relevantPos) {
+        const qty = parseFloat(p.position_info.qty);
+        const entry = parseFloat(p.position_info.avg_entry_price);
+        const upnl = parseFloat(p.upnl);
+        console.log(`    qty: ${qty.toFixed(6)} | entry: $${entry.toFixed(2)} | uPnL: ${upnl >= 0 ? "+" : ""}$${upnl.toFixed(4)}`);
+      }
     }
 
     if (this.consecutiveErrors > 0) {
-      console.log(
-        `\n  ⚠️  Error berturut-turut: ${this.consecutiveErrors} (cek koneksi)`
-      );
+      console.log(`\n  ⚠️  Error berturut-turut: ${this.consecutiveErrors}`);
     }
 
     console.log("\n  Tekan Ctrl+C untuk berhenti\n");
   }
 
-  // ── LOG TRADE ────────────────────────────────────────────────────────────
   private logRaw(msg: string) {
     const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
     process.stdout.write(`[${ts}] ${msg}\n`);
   }
 
-  // ── MAIN LOOP ────────────────────────────────────────────────────────────
   async start() {
-    const W = 62;
+    const W = 64;
     console.log("═".repeat(W));
-    console.log("  VARIATIONAL GRID BOT — Starting...");
+    console.log("  VARIATIONAL GRID BOT — Real Trading Mode");
     console.log("═".repeat(W));
-    console.log(`  Ticker       : ${CONFIG.ticker}`);
-    console.log(
-      `  Range        : $${CONFIG.gridLow.toLocaleString()} — $${CONFIG.gridHigh.toLocaleString()}`
-    );
-    console.log(
-      `  Grid Levels  : ${CONFIG.gridCount} level @ $${this.step.toLocaleString()} tiap level`
-    );
-    console.log(`  Order Size   : $${CONFIG.orderSizeUsdc} USDC per level`);
-    console.log(`  Saldo Awal   : $${CONFIG.initialBalance.toLocaleString()}`);
-    console.log(
-      `  Polling      : setiap ${CONFIG.pollIntervalMs / 1000} detik`
-    );
+    console.log(`  Wallet  : ${this.address}`);
+    console.log(`  Ticker  : ${CONFIG.ticker}`);
+    console.log(`  Range   : $${CONFIG.gridLow.toLocaleString()} — $${CONFIG.gridHigh.toLocaleString()}`);
+    console.log(`  Levels  : ${CONFIG.gridCount} @ $${this.step.toLocaleString()} per level`);
+    console.log(`  Order   : $${CONFIG.orderSizeUsdc} USDC per level`);
     console.log("─".repeat(W));
-    console.log(
-      "  ⚠️  Ini adalah PAPER TRADING — tidak ada uang nyata yang digunakan."
-    );
-    console.log(
-      "  Trading API Variational belum tersedia untuk publik."
-    );
+    console.log("  ⚠️  REAL TRADING — Order akan tereksekusi ke exchange!");
     console.log("─".repeat(W) + "\n");
 
     const tick = async () => {
       this.fetchCount++;
-      const price = await this.fetchPrice();
-      if (price !== null) {
-        this.lastPrice = price;
-        this.processPrice(price);
-        this.displayDashboard(price);
+      const result = await fetchPrice(this.token, this.address);
+
+      if (result) {
+        this.lastFundingRate = result.fundingRate;
+        this.lastVolume24h = result.volume;
+        this.consecutiveErrors = 0;
+        await this.processPrice(result.price);
+        // Fetch posisi tiap 3 tick
+        if (this.fetchCount % 3 === 0) {
+          this.positions = await fetchPositions(this.token, this.address);
+        }
+        this.displayDashboard(result.price);
+      } else {
+        this.consecutiveErrors++;
+        this.logRaw(`[ERROR #${this.consecutiveErrors}] Gagal fetch harga`);
       }
     };
 
-    // Fetch pertama langsung, lalu interval
     await tick();
     const interval = setInterval(tick, CONFIG.pollIntervalMs);
 
-    // Graceful shutdown saat Ctrl+C
     process.on("SIGINT", () => {
       clearInterval(interval);
-      console.log("\n\n  Bot dihentikan. Ringkasan akhir:");
-      console.log(`    Realized P&L  : ${this.totalRealizedPnl >= 0 ? "+" : ""}$${this.totalRealizedPnl.toFixed(2)}`);
-      console.log(`    Total Fills   : ${this.fillCount}`);
-      console.log(`    API Calls     : ${this.fetchCount}`);
-      console.log(
-        `    Uptime        : ${Math.floor((Date.now() - this.startTime.getTime()) / 1000)}s\n`
-      );
+      console.log("\n\n  Bot dihentikan.");
+      console.log(`    Realized P&L : ${this.totalRealizedPnl >= 0 ? "+" : ""}$${this.totalRealizedPnl.toFixed(4)}`);
+      console.log(`    Total Fills  : ${this.fillCount}`);
+      console.log(`    API Calls    : ${this.fetchCount}\n`);
       process.exit(0);
     });
   }
 }
 
 // ── ENTRY POINT ────────────────────────────────────────────────────────────
-const bot = new GridBot();
-bot.start().catch((err) => {
+async function main() {
+  const privateKey = process.env["WALLET_PRIVATE_KEY"];
+  if (!privateKey) {
+    console.error("ERROR: WALLET_PRIVATE_KEY tidak diset di environment secrets.");
+    process.exit(1);
+  }
+
+  const wallet = new Wallet(privateKey);
+  const address = await wallet.getAddress();
+
+  console.log(`Wallet: ${address}`);
+  console.log("Login ke Variational...");
+
+  let token: string;
+  try {
+    token = await login(wallet);
+    console.log("Login berhasil!\n");
+  } catch (err) {
+    console.error(`Login gagal: ${err}`);
+    process.exit(1);
+  }
+
+  const bot = new GridBot(token, address);
+  await bot.start();
+}
+
+main().catch((err) => {
   console.error("Bot crash:", err);
   process.exit(1);
 });

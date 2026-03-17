@@ -626,6 +626,10 @@ importers:
         version: 0.31.9
 
   scripts:
+    dependencies:
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
