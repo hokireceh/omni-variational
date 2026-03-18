@@ -442,10 +442,22 @@ class VariationalClient {
         funding_interval_s: fundingIntervalS,
         settlement_asset: "USDC",
       };
-      const res = await curlFetch(`${BASE}/api/quotes/simple`, {
-        method: "POST",
-        body: JSON.stringify({ instrument, qty }),
-      });
+      const body = JSON.stringify({ instrument, qty });
+
+      // Endpoint ini kena Cloudflare Managed Challenge dari IP server.
+      // Gunakan authedCurl (dengan vr-token cookie) jika tersedia.
+      // Kalau tidak ada token, fallback curlFetch dengan cookie yang ada — mungkin gagal (silent).
+      let res: CurlResponse;
+      if (this.token) {
+        res = await this.authedCurl(`${BASE}/api/quotes/simple`, { method: "POST", body });
+      } else {
+        res = await curlFetch(`${BASE}/api/quotes/simple`, {
+          method: "POST",
+          body,
+          cookieStr: this.buildCookieStr(),
+        });
+      }
+
       if (res.status !== 200) return null;
       const d = JSON.parse(res.body) as {
         bid: string;
@@ -465,8 +477,9 @@ class VariationalClient {
   }
 
   /**
-   * Ambil open interest (long qty vs short qty) dari endpoint publik Variational.
-   * Tidak butuh auth. Silent fail — kembalikan null jika ada error.
+   * Ambil open interest (long qty vs short qty).
+   * Endpoint kena Cloudflare dari IP server — gunakan token jika ada.
+   * Silent fail — kembalikan null jika ada error.
    */
   async getOpenInterest(
     ticker: string,
@@ -479,10 +492,19 @@ class VariationalClient {
         funding_interval_s: fundingIntervalS,
         settlement_asset: "USDC",
       };
-      const res = await curlFetch(`${BASE}/api/metadata/open_interest`, {
-        method: "POST",
-        body: JSON.stringify({ instrument }),
-      });
+      const body = JSON.stringify({ instrument });
+
+      let res: CurlResponse;
+      if (this.token) {
+        res = await this.authedCurl(`${BASE}/api/metadata/open_interest`, { method: "POST", body });
+      } else {
+        res = await curlFetch(`${BASE}/api/metadata/open_interest`, {
+          method: "POST",
+          body,
+          cookieStr: this.buildCookieStr(),
+        });
+      }
+
       if (res.status !== 200) return null;
       const d = JSON.parse(res.body) as {
         long_qty: string;
