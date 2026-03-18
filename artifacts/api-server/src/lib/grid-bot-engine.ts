@@ -158,11 +158,9 @@ class GridBotEngine {
     this.volume24h = "$" + (info.volume24h / 1_000_000).toFixed(2) + "M";
     this.consecutiveErrors = 0;
 
-    // Sync saldo dari exchange setiap 10 tick
-    if (this.fetchCount % 10 === 0) {
-      this.syncPortfolio().catch((e) =>
-        console.error("[GridBot] syncPortfolio error:", e)
-      );
+    // Sync saldo dari exchange setiap 10 tick (skip jika CF sedang blokir)
+    if (this.fetchCount % 10 === 0 && !varClient.isCfBlocked()) {
+      this.syncPortfolio().catch(() => { /* sudah di-handle di syncPortfolio */ });
     }
 
     return info.price;
