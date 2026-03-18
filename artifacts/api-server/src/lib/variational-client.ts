@@ -258,9 +258,11 @@ class VariationalClient {
       cookieStr: this.buildCookieStr(),
     });
 
-    // Token expired → re-login dan retry sekali
-    if (res.status === 401 && this.wallet) {
-      console.log("[VarClient] Token expired, re-login...");
+    // Token expired/invalid → re-login dan retry sekali
+    if ((res.status === 401 || res.status === 403) && this.wallet) {
+      console.log(`[VarClient] Got ${res.status}, re-login via SIWE...`);
+      this.token = null;
+      this.tokenExpiresAt = 0;
       await this.login();
       return curlFetch(url, {
         ...opts,
