@@ -133,6 +133,9 @@ export interface Position {
 export interface PlaceOrderResult {
   success: boolean;
   orderId?: string;
+  executionPrice?: number;
+  bid?: number;
+  ask?: number;
   error?: string;
 }
 
@@ -495,8 +498,9 @@ class VariationalClient {
     };
 
     try {
-      // Step 1: Request Quote (RFQ)
-      const quoteRes = await this.authedCurl(`${BASE}/api/quotes/indicative`, {
+      // Step 1: Get quote via /api/quotes/simple
+      // Response: {quote_id, bid, ask, mark_price, index_price, qty, qty_limits, timestamp}
+      const quoteRes = await this.authedCurl(`${BASE}/api/quotes/simple`, {
         method: "POST",
         body: JSON.stringify({ instrument, side, qty: qty.toString() }),
       });
@@ -505,12 +509,21 @@ class VariationalClient {
         return { success: false, error: `Quote gagal (${quoteRes.status}): ${quoteRes.body.slice(0, 200)}` };
       }
 
-      const quote = JSON.parse(quoteRes.body) as { quote_id: string };
+      const quote = JSON.parse(quoteRes.body) as {
+        quote_id: string;
+        bid: string;
+        ask: string;
+        mark_price: string;
+      };
       const rfqId = quote.quote_id;
 
       if (!rfqId) {
         return { success: false, error: "quote_id tidak ada di response" };
       }
+
+      const bid = parseFloat(quote.bid);
+      const ask = parseFloat(quote.ask);
+      const executionPrice = side === "bid" ? bid : ask;
 
       // Step 2: Submit Market Order
       const orderRes = await this.authedCurl(`${BASE}/api/orders/new/market`, {
@@ -527,10 +540,10 @@ class VariationalClient {
       }
 
       console.log(
-        `[VarClient] Order ${side.toUpperCase()} ${qty} ${ticker} berhasil, rfq_id=${rfqId}`
+        `[VarClient] Order ${side.toUpperCase()} ${qty} ${ticker} @ ${executionPrice} berhasil, rfq_id=${rfqId}`
       );
 
-      return { success: true, orderId: rfqId };
+      return { success: true, orderId: rfqId, executionPrice, bid, ask };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, error: msg };
