@@ -110,10 +110,17 @@ class VariationalClient {
       throw new Error("Wallet tidak tersedia untuk login");
     }
 
+    const cfClearance = process.env.CF_CLEARANCE;
+    const baseHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      ...(cfClearance ? { Cookie: `cf_clearance=${cfClearance}` } : {}),
+    };
+
     // Step 1: Minta SIWE message
     const siweRes = await fetch(`${BASE}/api/auth/generate_signing_data`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: baseHeaders,
       body: JSON.stringify({ address: this.walletAddress }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -127,7 +134,7 @@ class VariationalClient {
     // Step 3: Login dan ambil token
     const loginRes = await fetch(`${BASE}/api/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: baseHeaders,
       body: JSON.stringify({ message: siweMessage, signature }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -140,6 +147,14 @@ class VariationalClient {
     console.log("[VarClient] Login berhasil, token valid 6 hari");
   }
 
+  private buildCookieHeader(): string {
+    const parts: string[] = [];
+    if (this.token) parts.push(`vr-token=${this.token}`);
+    const cfClearance = process.env.CF_CLEARANCE;
+    if (cfClearance) parts.push(`cf_clearance=${cfClearance}`);
+    return parts.join("; ");
+  }
+
   private async authedFetch(
     url: string,
     options: RequestInit = {}
@@ -147,7 +162,8 @@ class VariationalClient {
     await this.ensureToken();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      Cookie: `vr-token=${this.token}`,
+      Cookie: this.buildCookieHeader(),
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
       ...(this.walletAddress
         ? { "vr-connected-address": this.walletAddress }
         : {}),
@@ -164,7 +180,7 @@ class VariationalClient {
     if (res.status === 401 && this.wallet) {
       console.log("[VarClient] Token expired, re-login...");
       await this.login();
-      headers.Cookie = `vr-token=${this.token}`;
+      headers.Cookie = this.buildCookieHeader();
       return fetch(url, { ...options, headers });
     }
 
