@@ -5,6 +5,7 @@
  * Transport: curl (bypass Cloudflare TLS fingerprinting)
  */
 
+import "dotenv/config";
 import { Wallet } from "ethers";
 import { execFile } from "child_process";
 import { promisify } from "util";
