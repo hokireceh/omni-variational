@@ -176,6 +176,24 @@ class VariationalClient {
     return !!(this.token || this.wallet);
   }
 
+  /** Update CF_CLEARANCE dan/atau VR_TOKEN dari panel (tanpa restart server) */
+  updateAuth(opts: { cfClearance?: string; vrToken?: string }) {
+    if (opts.cfClearance) {
+      process.env.CF_CLEARANCE = opts.cfClearance;
+      console.log("[VarClient] CF_CLEARANCE diupdate dari panel");
+    }
+    if (opts.vrToken) {
+      this.token = opts.vrToken;
+      this.tokenExpiresAt = Date.now() + 6 * 24 * 60 * 60 * 1000;
+      console.log("[VarClient] VR_TOKEN diupdate dari panel");
+    }
+    // Reset token state agar re-login terjadi dengan cookie baru
+    if (opts.cfClearance && !opts.vrToken) {
+      this.token = null;
+      this.tokenExpiresAt = 0;
+    }
+  }
+
   private buildCookieStr(): string {
     const parts: string[] = [];
     if (this.token) parts.push(`vr-token=${this.token}`);
@@ -277,13 +295,12 @@ class VariationalClient {
   // ── PRICE / MARKET DATA ──────────────────────────────────────────────────
 
   async getAssetInfo(ticker: string): Promise<AssetInfo> {
-    const res = await fetch(`${STATS_BASE}/metadata/stats`, {
+    const res = await curlFetch(`${STATS_BASE}/metadata/stats`, {
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(8_000),
     });
-    if (!res.ok) throw new Error(`metadata/stats gagal: ${res.status}`);
+    if (res.status !== 200) throw new Error(`metadata/stats gagal: ${res.status}`);
 
-    const data = (await res.json()) as {
+    const data = JSON.parse(res.body) as {
       listings: Array<{
         ticker: string;
         mark_price: string;

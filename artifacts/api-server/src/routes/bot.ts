@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { botEngine } from "../lib/grid-bot-engine";
+import { varClient } from "../lib/variational-client";
 import {
   GetBotStatusResponse,
   StartBotResponse,
@@ -73,6 +74,20 @@ router.post("/bot/reset", (_req, res) => {
   botEngine.reset();
   const data = ResetBotResponse.parse(botEngine.getStatus());
   res.json(data);
+});
+
+// POST /auth/cookies — update CF_CLEARANCE dan/atau VR_TOKEN dari panel
+router.post("/auth/cookies", (req, res) => {
+  const { cfClearance, vrToken } = req.body as {
+    cfClearance?: string;
+    vrToken?: string;
+  };
+  if (!cfClearance && !vrToken) {
+    res.status(400).json({ error: "cfClearance atau vrToken harus diisi" });
+    return;
+  }
+  varClient.updateAuth({ cfClearance, vrToken });
+  res.json({ ok: true, updated: { cfClearance: !!cfClearance, vrToken: !!vrToken } });
 });
 
 export default router;
