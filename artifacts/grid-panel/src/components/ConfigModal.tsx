@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useForm } from "react-hook-form";
 import { BotConfig, BotConfigMode } from "@workspace/api-client-react";
 import { useBotActions, useBotConfig } from "@/hooks/use-bot";
@@ -69,21 +70,21 @@ export function ConfigModal({ isRunning }: ConfigModalProps) {
       </button>
 
       <AnimatePresence>
-        {isOpen && (
+        {isOpen && createPortal(
           <>
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsOpen(false)}
-              className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm"
+              className="fixed inset-0 z-[9998] bg-background/80 backdrop-blur-sm"
             />
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+            <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 pointer-events-none">
               <motion.div
                 initial={{ opacity: 0, scale: 0.95, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                className="pointer-events-auto w-full max-w-lg glass-panel rounded-2xl shadow-2xl border border-white/10 flex flex-col max-h-[90vh]"
+                className="pointer-events-auto w-full max-w-lg bg-card border border-white/10 rounded-2xl shadow-2xl flex flex-col max-h-[90vh]"
               >
                 {/* Header — fixed */}
                 <div className="flex justify-between items-center p-6 pb-4 shrink-0">
@@ -279,7 +280,8 @@ export function ConfigModal({ isRunning }: ConfigModalProps) {
                 </div>
               </motion.div>
             </div>
-          </>
+          </>,
+          document.body
         )}
       </AnimatePresence>
     </>
