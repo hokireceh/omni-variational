@@ -11,6 +11,7 @@
 import { Wallet } from "ethers";
 
 const BASE = "https://omni.variational.io";
+const STATS_BASE = "https://omni-client-api.prod.ap-northeast-1.variational.io";
 
 // ── TYPES ──────────────────────────────────────────────────────────────────
 
@@ -173,43 +174,43 @@ class VariationalClient {
   // ── PRICE / MARKET DATA ──────────────────────────────────────────────────
 
   async getAssetInfo(ticker: string): Promise<AssetInfo> {
-    const res = await this.authedFetch(
-      `${BASE}/api/metadata/supported_assets?cex_asset=${ticker}`
-    );
-    if (!res.ok) throw new Error(`supported_assets gagal: ${res.status}`);
+    // Gunakan omni-client-api/metadata/stats yang tidak diblok Cloudflare
+    const res = await fetch(`${STATS_BASE}/metadata/stats`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) throw new Error(`metadata/stats gagal: ${res.status}`);
 
-    const data = (await res.json()) as Record<
-      string,
-      Array<{
-        price: string;
-        index_price: string;
+    const data = (await res.json()) as {
+      listings: Array<{
+        ticker: string;
+        mark_price: string;
         funding_rate: string;
-        next_funding_rate: string;
-        funding_interval_s: number;
-        funding_time: string;
         volume_24h: string;
-        open_interest: {
-          long_open_interest: string;
-          short_open_interest: string;
+        funding_interval_s: number;
+        quotes?: {
+          base?: { bid: string; ask: string };
         };
-      }>
-    >;
+      }>;
+    };
 
-    const list = data[ticker];
-    if (!list || list.length === 0) throw new Error(`Ticker ${ticker} tidak ditemukan`);
-    const a = list[0];
+    const listing = data.listings?.find((l) => l.ticker === ticker);
+    if (!listing) throw new Error(`Ticker "${ticker}" tidak ditemukan`);
+
+    const price = parseFloat(listing.mark_price);
+    const fundingRate = parseFloat(listing.funding_rate);
 
     return {
       underlying: ticker,
-      price: parseFloat(a.price),
-      indexPrice: parseFloat(a.index_price),
-      fundingRate: parseFloat(a.funding_rate),
-      nextFundingRate: parseFloat(a.next_funding_rate),
-      fundingIntervalS: a.funding_interval_s,
-      nextFundingTime: a.funding_time,
-      volume24h: parseFloat(a.volume_24h),
-      openInterestLong: parseFloat(a.open_interest.long_open_interest),
-      openInterestShort: parseFloat(a.open_interest.short_open_interest),
+      price,
+      indexPrice: price,
+      fundingRate,
+      nextFundingRate: fundingRate,
+      fundingIntervalS: listing.funding_interval_s ?? 28800,
+      nextFundingTime: new Date(Date.now() + (listing.funding_interval_s ?? 28800) * 1000).toISOString(),
+      volume24h: parseFloat(listing.volume_24h),
+      openInterestLong: 0,
+      openInterestShort: 0,
     };
   }
 
