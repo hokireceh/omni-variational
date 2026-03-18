@@ -4,15 +4,17 @@ import { motion } from "framer-motion";
 
 interface StatCardProps {
   title: string;
+  subtitle?: string;
   value: number | null | undefined;
   isCurrency?: boolean;
   icon?: ReactNode;
   trend?: "up" | "down" | "neutral";
   className?: string;
   loading?: boolean;
+  unavailable?: boolean;
 }
 
-export function StatCard({ title, value, isCurrency = true, icon, trend = "neutral", className, loading }: StatCardProps) {
+export function StatCard({ title, subtitle, value, isCurrency = true, icon, trend = "neutral", className, loading, unavailable }: StatCardProps) {
   const isPositive = (value ?? 0) > 0;
   const isNegative = (value ?? 0) < 0;
   
@@ -27,14 +29,20 @@ export function StatCard({ title, value, isCurrency = true, icon, trend = "neutr
         className
       )}
     >
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-1">
         <h3 className="text-sm font-medium text-muted-foreground">{title}</h3>
         {icon && <div className="text-muted-foreground/50 group-hover:text-primary transition-colors">{icon}</div>}
       </div>
+      {subtitle && (
+        <p className="text-xs text-muted-foreground/60 mb-3">{subtitle}</p>
+      )}
+      {!subtitle && <div className="mb-3" />}
       
       <div className="flex items-baseline gap-2">
         {loading ? (
           <div className="h-8 w-24 bg-white/5 rounded animate-pulse" />
+        ) : unavailable ? (
+          <span className="text-3xl font-bold font-mono tracking-tight text-muted-foreground/40">—</span>
         ) : (
           <span className={cn(
             "text-3xl font-bold font-mono tracking-tight",

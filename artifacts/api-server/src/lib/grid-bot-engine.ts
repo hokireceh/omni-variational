@@ -464,7 +464,9 @@ class GridBotEngine {
       unrealizedPnl: this.config.mode === "live"
         ? (this.liveUpnl ?? unrealizedPnl)
         : unrealizedPnl,
-      totalPnl: realizedPnl + unrealizedPnl,
+      totalPnl: realizedPnl + (this.config.mode === "live"
+        ? (this.liveUpnl ?? unrealizedPnl)
+        : unrealizedPnl),
       fillCount: this.fillCount,
       fetchCount: this.fetchCount,
       uptimeSeconds,
