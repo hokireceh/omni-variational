@@ -146,6 +146,13 @@ class VariationalClient {
   private wallet: Wallet | null = null;
   private walletAddress: string | null = null;
 
+  /**
+   * Flag Cloudflare: set true saat IP server diblokir.
+   * Di-reset ke false saat user update VR_TOKEN atau CF_CLEARANCE baru.
+   * Ini mencegah spam re-login attempt yang pasti gagal.
+   */
+  private cfBlocked = false;
+
   constructor() {
     const pk = process.env.WALLET_PRIVATE_KEY;
     const addr = process.env.WALLET_ADDRESS;
@@ -176,22 +183,25 @@ class VariationalClient {
     return !!(this.token || this.wallet);
   }
 
+  isCfBlocked(): boolean {
+    return this.cfBlocked;
+  }
+
   /** Update CF_CLEARANCE dan/atau VR_TOKEN dari panel (tanpa restart server) */
   updateAuth(opts: { cfClearance?: string; vrToken?: string }) {
     if (opts.cfClearance) {
       process.env.CF_CLEARANCE = opts.cfClearance;
+      this.cfBlocked = false; // CF baru → reset blokir
       console.log("[VarClient] CF_CLEARANCE diupdate dari panel");
     }
     if (opts.vrToken) {
       this.token = opts.vrToken;
       this.tokenExpiresAt = Date.now() + 6 * 24 * 60 * 60 * 1000;
+      this.cfBlocked = false; // Token baru → reset blokir
       console.log("[VarClient] VR_TOKEN diupdate dari panel");
     }
-    // Reset token state agar re-login terjadi dengan cookie baru
-    if (opts.cfClearance && !opts.vrToken) {
-      this.token = null;
-      this.tokenExpiresAt = 0;
-    }
+    // PENTING: jangan reset token saat hanya CF_CLEARANCE diupdate.
+    // Token yang ada tetap valid — CF hanya dibutuhkan untuk SIWE re-login.
   }
 
   private buildCookieStr(): string {
@@ -205,6 +215,12 @@ class VariationalClient {
 
   private async ensureToken(): Promise<void> {
     if (this.token && Date.now() < this.tokenExpiresAt) return;
+
+    if (this.cfBlocked) {
+      throw new Error(
+        "VR_TOKEN expired dan IP server diblokir Cloudflare. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Token)."
+      );
+    }
 
     if (!this.wallet || !this.walletAddress) {
       throw new Error(
@@ -234,8 +250,9 @@ class VariationalClient {
     });
 
     if (this.isCloudflareBlock(siweRes)) {
+      this.cfBlocked = true;
       throw new Error(
-        "Cloudflare memblokir login dari server ini. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Update Token)."
+        "Cloudflare memblokir login dari server ini. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Token)."
       );
     }
 
@@ -263,15 +280,14 @@ class VariationalClient {
     const data = JSON.parse(loginRes.body) as { token: string };
     this.token = data.token;
     this.tokenExpiresAt = Date.now() + 6 * 24 * 60 * 60 * 1000;
+    this.cfBlocked = false;
     console.log("[VarClient] Login berhasil via SIWE, token valid 6 hari");
   }
 
   private isCloudflareBlock(res: CurlResponse): boolean {
     if (res.status !== 403 && res.status !== 503) return false;
     const trimmed = res.body.trimStart();
-    // Any HTML response on 403/503 is treated as a block (Cloudflare or Variational auth wall)
-    const isHtml = trimmed.startsWith("<!") || trimmed.startsWith("<html") || trimmed.startsWith("<HTML");
-    return isHtml;
+    return trimmed.startsWith("<!") || trimmed.startsWith("<html") || trimmed.startsWith("<HTML");
   }
 
   private async authedCurl(
@@ -290,16 +306,18 @@ class VariationalClient {
       cookieStr: this.buildCookieStr(),
     });
 
-    // Cloudflare block — jangan coba re-login, itu sia-sia dari server
+    // Cloudflare block — set flag dan lempar error, jangan re-login
     if (this.isCloudflareBlock(res)) {
+      this.cfBlocked = true;
       throw new Error(
-        "Cloudflare memblokir request dari server ini. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Update Token)."
+        "Cloudflare memblokir request dari server ini. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Token)."
       );
     }
 
-    // Token expired/invalid → re-login dan retry sekali
-    if ((res.status === 401 || res.status === 403) && this.wallet) {
-      console.log(`[VarClient] Got ${res.status}, re-login via SIWE...`);
+    // Hanya re-login pada 401 (token expired/invalid), BUKAN 403 (forbidden)
+    // 403 dari Variational = authorized tapi akses ditolak — re-login tidak akan membantu
+    if (res.status === 401 && this.wallet && !this.cfBlocked) {
+      console.log("[VarClient] Token expired (401), re-login via SIWE...");
       this.token = null;
       this.tokenExpiresAt = 0;
       await this.login();

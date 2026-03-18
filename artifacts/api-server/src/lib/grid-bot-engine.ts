@@ -203,7 +203,12 @@ class GridBotEngine {
       this.liveBalanceUsdc = portfolio.balance;
       this.liveUpnl = portfolio.upnl;
     } catch (e) {
-      console.error("[GridBot] Gagal sync portfolio:", e);
+      const msg = e instanceof Error ? e.message : String(e);
+      // Hanya log 1 baris, tanpa stack trace, dan hanya saat status baru berubah
+      if (!varClient.isCfBlocked()) {
+        console.warn(`[GridBot] syncPortfolio gagal: ${msg.split("\n")[0]}`);
+      }
+      // Jika cfBlocked: sudah di-log saat pertama kali blokir, tidak perlu spam tiap poll
     }
   }
 
