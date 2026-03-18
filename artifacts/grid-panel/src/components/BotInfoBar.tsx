@@ -1,4 +1,5 @@
 import { BotStatus } from "@workspace/api-client-react";
+import { MarketData } from "@/hooks/use-variational-market";
 import { formatCurrency } from "@/lib/utils";
 
 function OIBar({ longQty, shortQty }: { longQty: number; shortQty: number }) {
@@ -20,12 +21,24 @@ function OIBar({ longQty, shortQty }: { longQty: number; shortQty: number }) {
   );
 }
 
-export function BotInfoBar({ status }: { status?: BotStatus }) {
+interface BotInfoBarProps {
+  status?: BotStatus;
+  marketData?: MarketData;
+}
+
+export function BotInfoBar({ status, marketData }: BotInfoBarProps) {
   if (!status) return null;
 
-  const hasBidAsk = status.bid != null && status.ask != null;
-  const spread = hasBidAsk ? (status.ask! - status.bid!) : null;
-  const hasOI = status.openInterestLong != null && status.openInterestShort != null;
+  // Prioritas: data dari browser (langsung ke Variational) > data dari backend (sering CF-blocked)
+  const bid = marketData?.bid ?? status.bid;
+  const ask = marketData?.ask ?? status.ask;
+  const indexPrice = marketData?.indexPrice ?? status.indexPrice;
+  const openInterestLong = marketData?.openInterestLong ?? status.openInterestLong;
+  const openInterestShort = marketData?.openInterestShort ?? status.openInterestShort;
+
+  const hasBidAsk = bid != null && ask != null;
+  const spread = hasBidAsk ? (ask! - bid!) : null;
+  const hasOI = openInterestLong != null && openInterestShort != null;
 
   const info = [
     { label: "Asset", value: status.ticker },
@@ -48,36 +61,53 @@ export function BotInfoBar({ status }: { status?: BotStatus }) {
       ))}
 
       {/* Bid / Ask / Spread */}
-      {hasBidAsk && (
+      {hasBidAsk ? (
+        <>
+          <div className="flex flex-col">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Bid / Ask</span>
+            <div className="flex items-center gap-1.5 font-mono text-sm">
+              <span className="text-emerald-400">${formatCurrency(bid!)}</span>
+              <span className="text-muted-foreground">/</span>
+              <span className="text-rose-400">${formatCurrency(ask!)}</span>
+            </div>
+          </div>
+          {spread != null && (
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Spread</span>
+              <span className="font-mono text-sm text-amber-400">${spread.toFixed(2)}</span>
+            </div>
+          )}
+        </>
+      ) : (
         <div className="flex flex-col">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Bid / Ask</span>
-          <div className="flex items-center gap-1.5 font-mono text-sm">
-            <span className="text-emerald-400">${formatCurrency(status.bid!)}</span>
-            <span className="text-muted-foreground">/</span>
-            <span className="text-rose-400">${formatCurrency(status.ask!)}</span>
-          </div>
-        </div>
-      )}
-      {spread != null && (
-        <div className="flex flex-col">
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Spread</span>
-          <span className="font-mono text-sm text-amber-400">${spread.toFixed(2)}</span>
+          <span className="font-mono text-sm text-muted-foreground/50">memuat...</span>
         </div>
       )}
 
       {/* Open Interest bar */}
-      {hasOI && (
+      {hasOI ? (
         <div className="flex flex-col">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Open Interest</span>
-          <OIBar longQty={status.openInterestLong!} shortQty={status.openInterestShort!} />
+          <OIBar longQty={openInterestLong!} shortQty={openInterestShort!} />
+        </div>
+      ) : (
+        <div className="flex flex-col">
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Open Interest</span>
+          <span className="font-mono text-sm text-muted-foreground/50">memuat...</span>
         </div>
       )}
 
       {/* Index Price */}
-      {status.indexPrice != null && (
+      {indexPrice != null ? (
         <div className="flex flex-col">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Index</span>
-          <span className="font-mono text-sm text-foreground">${formatCurrency(status.indexPrice)}</span>
+          <span className="font-mono text-sm text-foreground">${formatCurrency(indexPrice)}</span>
+        </div>
+      ) : (
+        <div className="flex flex-col">
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Index</span>
+          <span className="font-mono text-sm text-muted-foreground/50">—</span>
         </div>
       )}
     </div>

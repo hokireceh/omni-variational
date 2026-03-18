@@ -1,11 +1,12 @@
 import { useBotPolling, useBotActions } from "@/hooks/use-bot";
+import { useVariationalMarketData } from "@/hooks/use-variational-market";
 import { StatCard } from "@/components/StatCard";
 import { GridVisualizer } from "@/components/GridVisualizer";
 import { TradeHistory } from "@/components/TradeHistory";
 import { BotInfoBar } from "@/components/BotInfoBar";
 import { ConfigModal } from "@/components/ConfigModal";
 import { TokenModal } from "@/components/TokenModal";
-import { Wallet, TrendingUp, Activity, PieChart, Power, RotateCcw, AlertTriangle } from "lucide-react";
+import { Wallet, TrendingUp, Activity, PieChart, Power, RotateCcw, AlertTriangle, Wifi } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 
 export default function Dashboard() {
@@ -15,6 +16,10 @@ export default function Dashboard() {
   const isRunning = status?.running ?? false;
   const isLive = status?.mode === "live";
   const liveDataAvailable = isLive && status?.liveBalanceUsdc != null;
+
+  // Fetch market data langsung dari browser → bypass Cloudflare yang blokir server
+  const marketData = useVariationalMarketData(status?.ticker, isRunning);
+  const marketDataOk = marketData.bid != null;
 
   const handleTogglePower = () => {
     if (isRunning) stopBot();
@@ -27,7 +32,6 @@ export default function Dashboard() {
     }
   };
 
-  // Format uptime
   const formatUptime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -44,7 +48,7 @@ export default function Dashboard() {
         
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gradient">Variational Grid Terminal</h1>
-          <div className="flex items-center gap-3 mt-2">
+          <div className="flex flex-wrap items-center gap-3 mt-2">
             <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-black/40 border border-white/5">
               <div className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-success animate-pulse shadow-[0_0_10px_var(--color-success)]' : 'bg-muted'}`} />
               <span className="text-xs font-mono font-medium tracking-widest uppercase text-muted-foreground">
@@ -53,7 +57,7 @@ export default function Dashboard() {
             </div>
             {status?.currentPrice && (
               <span className="text-sm font-mono bg-primary/10 text-primary px-3 py-1 rounded-full border border-primary/20">
-                {status.ticker} @ ${formatCurrency(status.currentPrice)}
+                {status.ticker} @ ${formatCurrency(marketData.markPrice ?? status.currentPrice)}
               </span>
             )}
             {status && (
@@ -73,6 +77,17 @@ export default function Dashboard() {
             {status?.uptimeSeconds !== undefined && (
               <span className="text-xs font-mono text-muted-foreground">
                 UP: {formatUptime(status.uptimeSeconds)}
+              </span>
+            )}
+            {/* Indikator market data feed */}
+            {isRunning && (
+              <span className={`text-xs font-mono px-2 py-1 rounded-full border flex items-center gap-1 ${
+                marketDataOk
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : 'bg-white/5 text-muted-foreground/50 border-white/5'
+              }`}>
+                <Wifi className="w-3 h-3" />
+                {marketDataOk ? 'Feed OK' : 'Feed...'}
               </span>
             )}
           </div>
@@ -106,11 +121,19 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Live mode tapi data belum masuk (token invalid/CF block) */}
+      {/* Warning: live mode tapi portfolio tidak bisa disinkron */}
       {isLive && isRunning && !liveDataAvailable && (
-        <div className="flex items-center gap-3 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-sm text-amber-300">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          <span>Saldo live belum tersinkron — Cloudflare memblokir koneksi ke Variational. Gunakan tombol <strong>Token</strong> untuk update VR_TOKEN dari browser.</span>
+        <div className="flex items-start gap-3 px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-sm text-amber-300">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p>
+              <strong>Saldo real tidak dapat ditampilkan</strong> — Cloudflare memblokir koneksi ke Variational dari server. 
+              Gunakan tombol <strong>Token</strong> untuk menyediakan VR_TOKEN agar order bisa ditempatkan.
+            </p>
+            <p className="text-amber-400/70 text-xs">
+              Data harga (bid/ask, open interest) diambil langsung dari browser kamu dan tidak terpengaruh oleh masalah ini.
+            </p>
+          </div>
         </div>
       )}
 
@@ -158,14 +181,14 @@ export default function Dashboard() {
 
       {/* Main Content Area */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[600px]">
-        {/* Left: Grid Vis (Spans 1 col on large) */}
+        {/* Left: Grid Vis */}
         <div className="lg:col-span-1 h-full">
-          <GridVisualizer status={status} />
+          <GridVisualizer status={status} marketData={marketData} />
         </div>
         
-        {/* Right: Info & Trades (Spans 2 cols on large) */}
+        {/* Right: Info & Trades */}
         <div className="lg:col-span-2 flex flex-col gap-6 h-full">
-          <BotInfoBar status={status} />
+          <BotInfoBar status={status} marketData={marketData} />
           <div className="flex-1 min-h-0">
             <TradeHistory />
           </div>
