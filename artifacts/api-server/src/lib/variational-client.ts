@@ -233,6 +233,12 @@ class VariationalClient {
       cookieStr: this.buildCookieStr(),
     });
 
+    if (this.isCloudflareBlock(siweRes)) {
+      throw new Error(
+        "Cloudflare memblokir login dari server ini. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Update Token)."
+      );
+    }
+
     if (siweRes.status !== 200) {
       throw new Error(`generate_signing_data gagal: ${siweRes.status}\n${siweRes.body.slice(0, 300)}`);
     }
@@ -260,6 +266,16 @@ class VariationalClient {
     console.log("[VarClient] Login berhasil via SIWE, token valid 6 hari");
   }
 
+  private isCloudflareBlock(res: CurlResponse): boolean {
+    return (
+      (res.status === 403 || res.status === 503) &&
+      (res.body.includes("Just a moment") ||
+        res.body.includes("cf-browser-verification") ||
+        res.body.includes("__cf_chl") ||
+        res.body.includes("Cloudflare"))
+    );
+  }
+
   private async authedCurl(
     url: string,
     opts: { method?: string; body?: string } = {}
@@ -275,6 +291,13 @@ class VariationalClient {
       headers,
       cookieStr: this.buildCookieStr(),
     });
+
+    // Cloudflare block — jangan coba re-login, itu sia-sia dari server
+    if (this.isCloudflareBlock(res)) {
+      throw new Error(
+        "Cloudflare memblokir request dari server ini. Perbarui VR_TOKEN dari dashboard (tombol 🔑 Update Token)."
+      );
+    }
 
     // Token expired/invalid → re-login dan retry sekali
     if ((res.status === 401 || res.status === 403) && this.wallet) {

@@ -4,6 +4,7 @@ import { GridVisualizer } from "@/components/GridVisualizer";
 import { TradeHistory } from "@/components/TradeHistory";
 import { BotInfoBar } from "@/components/BotInfoBar";
 import { ConfigModal } from "@/components/ConfigModal";
+import { TokenModal } from "@/components/TokenModal";
 import { Wallet, TrendingUp, Activity, PieChart, Power, RotateCcw } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 
@@ -67,6 +68,7 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-3 relative z-10">
+          <TokenModal />
           <ConfigModal isRunning={isRunning} />
           
           <button
