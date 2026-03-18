@@ -3,15 +3,99 @@
  * Handles authentication (SIWE), price fetching, quotes, and order placement
  * Base URL: https://omni.variational.io
  *
- * Auth modes:
- *   1. WALLET_PRIVATE_KEY + WALLET_ADDRESS env vars → auto-login via SIWE
- *   2. VR_TOKEN env var → gunakan token langsung (manual, valid ~7 hari)
+ * Menggunakan curl (bukan Node fetch) untuk bypass Cloudflare TLS fingerprinting.
  */
 
 import { Wallet } from "ethers";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 const BASE = "https://omni.variational.io";
 const STATS_BASE = "https://omni-client-api.prod.ap-northeast-1.variational.io";
+
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+
+const BROWSER_HEADERS = [
+  "accept: */*",
+  "accept-encoding: gzip, deflate, br, zstd",
+  "accept-language: en-US,en;q=0.9",
+  "origin: https://omni.variational.io",
+  "referer: https://omni.variational.io/perpetual/BTC",
+  'sec-ch-ua: "Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+  "sec-ch-ua-mobile: ?0",
+  'sec-ch-ua-platform: "Windows"',
+  "sec-fetch-dest: empty",
+  "sec-fetch-mode: cors",
+  "sec-fetch-site: same-origin",
+];
+
+// ── CURL HELPER ─────────────────────────────────────────────────────────────
+
+interface CurlResponse {
+  status: number;
+  body: string;
+}
+
+async function curlFetch(
+  url: string,
+  opts: {
+    method?: string;
+    body?: string;
+    headers?: Record<string, string>;
+    cookieStr?: string;
+  } = {}
+): Promise<CurlResponse> {
+  const args: string[] = [
+    "--silent",
+    "--compressed",
+    "--http2",
+    "--tlsv1.2",
+    "-w", "\n__STATUS__%{http_code}",
+    "-A", USER_AGENT,
+  ];
+
+  for (const h of BROWSER_HEADERS) {
+    args.push("-H", h);
+  }
+
+  if (opts.headers) {
+    for (const [k, v] of Object.entries(opts.headers)) {
+      args.push("-H", `${k}: ${v}`);
+    }
+  }
+
+  if (opts.cookieStr) {
+    args.push("-H", `cookie: ${opts.cookieStr}`);
+  }
+
+  if (opts.method && opts.method !== "GET") {
+    args.push("-X", opts.method);
+  }
+
+  if (opts.body) {
+    args.push("-H", "content-type: application/json");
+    args.push("--data-raw", opts.body);
+  }
+
+  args.push(url);
+
+  const { stdout } = await execFileAsync("curl", args, {
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 15_000,
+  });
+
+  const marker = "\n__STATUS__";
+  const idx = stdout.lastIndexOf(marker);
+  if (idx === -1) throw new Error(`curl output unexpected: ${stdout.slice(0, 200)}`);
+
+  const body = stdout.slice(0, idx);
+  const status = parseInt(stdout.slice(idx + marker.length), 10);
+
+  return { status, body };
+}
 
 // ── TYPES ──────────────────────────────────────────────────────────────────
 
@@ -81,7 +165,6 @@ class VariationalClient {
     const envToken = process.env.VR_TOKEN;
     if (envToken) {
       this.token = envToken;
-      // VR_TOKEN dari env — asumsikan valid 7 hari dari sekarang
       this.tokenExpiresAt = Date.now() + 6 * 24 * 60 * 60 * 1000;
       console.log("[VarClient] VR_TOKEN loaded from env");
     }
@@ -91,6 +174,15 @@ class VariationalClient {
 
   isConfigured(): boolean {
     return !!(this.token || this.wallet);
+  }
+
+  private buildCookieStr(): string {
+    const parts: string[] = [];
+    if (this.token) parts.push(`vr-token=${this.token}`);
+    if (this.walletAddress) parts.push(`vr-connected-address=${this.walletAddress.toLowerCase()}`);
+    const cf = process.env.CF_CLEARANCE;
+    if (cf) parts.push(`cf_clearance=${cf}`);
+    return parts.join("; ");
   }
 
   private async ensureToken(): Promise<void> {
@@ -110,78 +202,71 @@ class VariationalClient {
       throw new Error("Wallet tidak tersedia untuk login");
     }
 
-    const cfClearance = process.env.CF_CLEARANCE;
-    const baseHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-      ...(cfClearance ? { Cookie: `cf_clearance=${cfClearance}` } : {}),
+    const address = this.walletAddress;
+    const extraHeaders: Record<string, string> = {
+      "vr-connected-address": address,
     };
 
     // Step 1: Minta SIWE message
-    const siweRes = await fetch(`${BASE}/api/auth/generate_signing_data`, {
+    const siweRes = await curlFetch(`${BASE}/api/auth/generate_signing_data`, {
       method: "POST",
-      headers: baseHeaders,
-      body: JSON.stringify({ address: this.walletAddress }),
-      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({ address }),
+      headers: extraHeaders,
+      cookieStr: this.buildCookieStr(),
     });
 
-    if (!siweRes.ok) throw new Error(`generate_signing_data gagal: ${siweRes.status}`);
-    const siweMessage = await siweRes.text();
+    if (siweRes.status !== 200) {
+      throw new Error(`generate_signing_data gagal: ${siweRes.status}\n${siweRes.body.slice(0, 300)}`);
+    }
 
-    // Step 2: Sign SIWE message dengan private key
+    const siweMessage = siweRes.body.trim();
+
+    // Step 2: Sign dengan private key
     const signature = await this.wallet.signMessage(siweMessage);
 
     // Step 3: Login dan ambil token
-    const loginRes = await fetch(`${BASE}/api/auth/login`, {
+    const loginRes = await curlFetch(`${BASE}/api/auth/login`, {
       method: "POST",
-      headers: baseHeaders,
       body: JSON.stringify({ message: siweMessage, signature }),
-      signal: AbortSignal.timeout(10_000),
+      headers: extraHeaders,
+      cookieStr: this.buildCookieStr(),
     });
 
-    if (!loginRes.ok) throw new Error(`Login gagal: ${loginRes.status}`);
-    const { token } = (await loginRes.json()) as { token: string };
+    if (loginRes.status !== 200) {
+      throw new Error(`Login gagal: ${loginRes.status}\n${loginRes.body.slice(0, 300)}`);
+    }
 
-    this.token = token;
-    this.tokenExpiresAt = Date.now() + 6 * 24 * 60 * 60 * 1000; // 6 hari
-    console.log("[VarClient] Login berhasil, token valid 6 hari");
+    const data = JSON.parse(loginRes.body) as { token: string };
+    this.token = data.token;
+    this.tokenExpiresAt = Date.now() + 6 * 24 * 60 * 60 * 1000;
+    console.log("[VarClient] Login berhasil via SIWE, token valid 6 hari");
   }
 
-  private buildCookieHeader(): string {
-    const parts: string[] = [];
-    if (this.token) parts.push(`vr-token=${this.token}`);
-    const cfClearance = process.env.CF_CLEARANCE;
-    if (cfClearance) parts.push(`cf_clearance=${cfClearance}`);
-    return parts.join("; ");
-  }
-
-  private async authedFetch(
+  private async authedCurl(
     url: string,
-    options: RequestInit = {}
-  ): Promise<Response> {
+    opts: { method?: string; body?: string } = {}
+  ): Promise<CurlResponse> {
     await this.ensureToken();
+
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Cookie: this.buildCookieHeader(),
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-      ...(this.walletAddress
-        ? { "vr-connected-address": this.walletAddress }
-        : {}),
-      ...(options.headers as Record<string, string>),
+      "vr-connected-address": this.walletAddress ?? "",
     };
 
-    const res = await fetch(url, {
-      ...options,
+    const res = await curlFetch(url, {
+      ...opts,
       headers,
-      signal: options.signal ?? AbortSignal.timeout(10_000),
+      cookieStr: this.buildCookieStr(),
     });
 
-    // Token expired → refresh dan retry sekali
+    // Token expired → re-login dan retry sekali
     if (res.status === 401 && this.wallet) {
       console.log("[VarClient] Token expired, re-login...");
       await this.login();
-      headers.Cookie = this.buildCookieHeader();
-      return fetch(url, { ...options, headers });
+      return curlFetch(url, {
+        ...opts,
+        headers,
+        cookieStr: this.buildCookieStr(),
+      });
     }
 
     return res;
@@ -190,7 +275,6 @@ class VariationalClient {
   // ── PRICE / MARKET DATA ──────────────────────────────────────────────────
 
   async getAssetInfo(ticker: string): Promise<AssetInfo> {
-    // Gunakan omni-client-api/metadata/stats yang tidak diblok Cloudflare
     const res = await fetch(`${STATS_BASE}/metadata/stats`, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(8_000),
@@ -204,9 +288,6 @@ class VariationalClient {
         funding_rate: string;
         volume_24h: string;
         funding_interval_s: number;
-        quotes?: {
-          base?: { bid: string; ask: string };
-        };
       }>;
     };
 
@@ -233,12 +314,10 @@ class VariationalClient {
   // ── PORTFOLIO / BALANCE ──────────────────────────────────────────────────
 
   async getPortfolio(): Promise<Portfolio> {
-    const res = await this.authedFetch(
-      `${BASE}/api/portfolio?compute_margin=true`
-    );
-    if (!res.ok) throw new Error(`portfolio gagal: ${res.status}`);
+    const res = await this.authedCurl(`${BASE}/api/portfolio?compute_margin=true`);
+    if (res.status !== 200) throw new Error(`portfolio gagal: ${res.status}`);
 
-    const data = (await res.json()) as {
+    const data = JSON.parse(res.body) as {
       balance: string;
       upnl: string;
       margin_usage: {
@@ -258,10 +337,10 @@ class VariationalClient {
   // ── POSITIONS ────────────────────────────────────────────────────────────
 
   async getPositions(): Promise<Position[]> {
-    const res = await this.authedFetch(`${BASE}/api/positions`);
-    if (!res.ok) throw new Error(`positions gagal: ${res.status}`);
+    const res = await this.authedCurl(`${BASE}/api/positions`);
+    if (res.status !== 200) throw new Error(`positions gagal: ${res.status}`);
 
-    const data = (await res.json()) as Array<{
+    const data = JSON.parse(res.body) as Array<{
       position_info: {
         instrument: {
           underlying: string;
@@ -296,16 +375,6 @@ class VariationalClient {
 
   // ── ORDER PLACEMENT ──────────────────────────────────────────────────────
 
-  /**
-   * Place a market order via RFQ:
-   * 1. POST /api/quotes/indicative → dapat quote_id
-   * 2. POST /api/orders/new/market dengan rfq_id = quote_id
-   *
-   * @param ticker   e.g. "BTC"
-   * @param fundingIntervalS  e.g. 28800
-   * @param side     "bid" = beli long, "ask" = jual/short
-   * @param qty      jumlah aset (bukan USDC)
-   */
   async placeMarketOrder(
     ticker: string,
     fundingIntervalS: number,
@@ -321,17 +390,16 @@ class VariationalClient {
 
     try {
       // Step 1: Request Quote (RFQ)
-      const quoteRes = await this.authedFetch(`${BASE}/api/quotes/indicative`, {
+      const quoteRes = await this.authedCurl(`${BASE}/api/quotes/indicative`, {
         method: "POST",
         body: JSON.stringify({ instrument, side, qty: qty.toString() }),
       });
 
-      if (!quoteRes.ok) {
-        const errText = await quoteRes.text();
-        return { success: false, error: `Quote gagal (${quoteRes.status}): ${errText}` };
+      if (quoteRes.status !== 200) {
+        return { success: false, error: `Quote gagal (${quoteRes.status}): ${quoteRes.body.slice(0, 200)}` };
       }
 
-      const quote = (await quoteRes.json()) as { quote_id: string };
+      const quote = JSON.parse(quoteRes.body) as { quote_id: string };
       const rfqId = quote.quote_id;
 
       if (!rfqId) {
@@ -339,7 +407,7 @@ class VariationalClient {
       }
 
       // Step 2: Submit Market Order
-      const orderRes = await this.authedFetch(`${BASE}/api/orders/new/market`, {
+      const orderRes = await this.authedCurl(`${BASE}/api/orders/new/market`, {
         method: "POST",
         body: JSON.stringify({
           rfq_id: rfqId,
@@ -348,9 +416,8 @@ class VariationalClient {
         }),
       });
 
-      if (!orderRes.ok) {
-        const errText = await orderRes.text();
-        return { success: false, error: `Order gagal (${orderRes.status}): ${errText}` };
+      if (orderRes.status !== 200) {
+        return { success: false, error: `Order gagal (${orderRes.status}): ${orderRes.body.slice(0, 200)}` };
       }
 
       console.log(
