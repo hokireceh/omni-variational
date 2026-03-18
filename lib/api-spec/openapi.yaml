@@ -222,6 +222,21 @@ components:
         currentPrice:
           type: number
           nullable: true
+        bid:
+          type: number
+          nullable: true
+        ask:
+          type: number
+          nullable: true
+        indexPrice:
+          type: number
+          nullable: true
+        openInterestLong:
+          type: number
+          nullable: true
+        openInterestShort:
+          type: number
+          nullable: true
         balance:
           type: number
         initialBalance:

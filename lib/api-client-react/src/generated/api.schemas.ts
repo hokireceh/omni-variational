@@ -58,6 +58,11 @@ export interface BotStatus {
   running: boolean;
   ticker: string;
   currentPrice?: number | null;
+  bid?: number | null;
+  ask?: number | null;
+  indexPrice?: number | null;
+  openInterestLong?: number | null;
+  openInterestShort?: number | null;
   balance: number;
   initialBalance: number;
   openPositions: number;

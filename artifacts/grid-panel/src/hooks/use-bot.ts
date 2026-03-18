@@ -16,7 +16,7 @@ import {
 export function useBotPolling() {
   return useGetBotStatus({
     query: {
-      // Poll every 3 seconds
+      queryKey: getGetBotStatusQueryKey(),
       refetchInterval: 3000,
       refetchOnWindowFocus: true,
     }
@@ -28,6 +28,7 @@ export function useTradesPolling() {
     { limit: 50 },
     {
       query: {
+        queryKey: getGetBotTradesQueryKey({ limit: 50 }),
         refetchInterval: 3000,
       }
     }

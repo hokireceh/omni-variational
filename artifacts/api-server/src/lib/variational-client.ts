@@ -290,13 +290,14 @@ class VariationalClient {
 
     const siweMessage = siweRes.body.trim();
 
-    // Step 2: Sign dengan private key
-    const signature = await this.wallet.signMessage(siweMessage);
+    // Step 2: Sign dengan private key — strip 0x prefix sesuai format API Variational
+    const rawSig = await this.wallet.signMessage(siweMessage);
+    const signed_message = rawSig.startsWith("0x") ? rawSig.slice(2) : rawSig;
 
-    // Step 3: Submit login, terima token baru
+    // Step 3: Submit login — format: { address, signed_message } (bukan message/signature)
     const loginRes = await curlFetch(`${BASE}/api/auth/login`, {
       method: "POST",
-      body: JSON.stringify({ message: siweMessage, signature }),
+      body: JSON.stringify({ address, signed_message }),
       headers: extraHeaders,
       cookieStr: this.buildCookieStr(),
     });
@@ -405,6 +406,10 @@ class VariationalClient {
 
     const price = parseFloat(listing.mark_price);
     const fundingRate = parseFloat(listing.funding_rate);
+    const fundingIntervalS = listing.funding_interval_s ?? 3600;
+
+    // Fetch open interest secara paralel — silent fail jika gagal
+    const oi = await this.getOpenInterest(ticker, fundingIntervalS).catch(() => null);
 
     return {
       underlying: ticker,
@@ -412,12 +417,84 @@ class VariationalClient {
       indexPrice: price,
       fundingRate,
       nextFundingRate: fundingRate,
-      fundingIntervalS: listing.funding_interval_s ?? 28800,
-      nextFundingTime: new Date(Date.now() + (listing.funding_interval_s ?? 28800) * 1000).toISOString(),
+      fundingIntervalS,
+      nextFundingTime: new Date(Date.now() + fundingIntervalS * 1000).toISOString(),
       volume24h: parseFloat(listing.volume_24h),
-      openInterestLong: 0,
-      openInterestShort: 0,
+      openInterestLong: oi?.longQty ?? 0,
+      openInterestShort: oi?.shortQty ?? 0,
     };
+  }
+
+  /**
+   * Ambil quote (bid/ask/mark/index) dari endpoint publik Variational.
+   * Tidak butuh auth. Digunakan di paper mode untuk data harga yang lebih kaya.
+   * Silent fail — kembalikan null jika ada error.
+   */
+  async getQuote(
+    ticker: string,
+    fundingIntervalS: number,
+    qty = "0.001"
+  ): Promise<{ bid: number; ask: number; markPrice: number; indexPrice: number } | null> {
+    try {
+      const instrument = {
+        instrument_type: "perpetual_future",
+        underlying: ticker,
+        funding_interval_s: fundingIntervalS,
+        settlement_asset: "USDC",
+      };
+      const res = await curlFetch(`${BASE}/api/quotes/simple`, {
+        method: "POST",
+        body: JSON.stringify({ instrument, qty }),
+      });
+      if (res.status !== 200) return null;
+      const d = JSON.parse(res.body) as {
+        bid: string;
+        ask: string;
+        mark_price: string;
+        index_price: string;
+      };
+      return {
+        bid: parseFloat(d.bid),
+        ask: parseFloat(d.ask),
+        markPrice: parseFloat(d.mark_price),
+        indexPrice: parseFloat(d.index_price),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Ambil open interest (long qty vs short qty) dari endpoint publik Variational.
+   * Tidak butuh auth. Silent fail — kembalikan null jika ada error.
+   */
+  async getOpenInterest(
+    ticker: string,
+    fundingIntervalS: number
+  ): Promise<{ longQty: number; shortQty: number } | null> {
+    try {
+      const instrument = {
+        instrument_type: "perpetual_future",
+        underlying: ticker,
+        funding_interval_s: fundingIntervalS,
+        settlement_asset: "USDC",
+      };
+      const res = await curlFetch(`${BASE}/api/metadata/open_interest`, {
+        method: "POST",
+        body: JSON.stringify({ instrument }),
+      });
+      if (res.status !== 200) return null;
+      const d = JSON.parse(res.body) as {
+        long_qty: string;
+        short_qty: string;
+      };
+      return {
+        longQty: parseFloat(d.long_qty),
+        shortQty: parseFloat(d.short_qty),
+      };
+    } catch {
+      return null;
+    }
   }
 
   // ── PORTFOLIO / BALANCE ──────────────────────────────────────────────────

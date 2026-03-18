@@ -41,6 +41,11 @@ export interface BotStatusSnapshot {
   running: boolean;
   ticker: string;
   currentPrice: number | null;
+  bid: number | null;
+  ask: number | null;
+  indexPrice: number | null;
+  openInterestLong: number | null;
+  openInterestShort: number | null;
   balance: number;
   initialBalance: number;
   openPositions: number;
@@ -96,10 +101,17 @@ class GridBotEngine {
   private volume24h = "—";
   private consecutiveErrors = 0;
 
+  // Market data tambahan
+  private bid: number | null = null;
+  private ask: number | null = null;
+  private indexPrice: number | null = null;
+  private openInterestLong: number | null = null;
+  private openInterestShort: number | null = null;
+
   // Live mode: data dari exchange
   private liveBalanceUsdc: number | null = null;
   private liveUpnl: number | null = null;
-  private fundingIntervalS = 28800; // default 8 jam, akan diupdate dari API
+  private fundingIntervalS = 3600; // default 1 jam, akan diupdate dari API
 
   // ── KONFIGURASI ─────────────────────────────────────────────────────────
   getConfig(): BotConfig {
@@ -156,7 +168,15 @@ class GridBotEngine {
     this.fundingIntervalS = info.fundingIntervalS;
     this.fundingRate = (info.nextFundingRate * 100).toFixed(4) + "%";
     this.volume24h = "$" + (info.volume24h / 1_000_000).toFixed(2) + "M";
+    this.indexPrice = info.indexPrice;
+    if (info.openInterestLong) this.openInterestLong = info.openInterestLong;
+    if (info.openInterestShort) this.openInterestShort = info.openInterestShort;
     this.consecutiveErrors = 0;
+
+    // Fetch quote untuk bid/ask — paralel, tidak blocking
+    varClient.getQuote(this.config.ticker, this.fundingIntervalS).then((q) => {
+      if (q) { this.bid = q.bid; this.ask = q.ask; }
+    }).catch(() => {});
 
     // Sync saldo dari exchange setiap 10 tick (skip jika CF sedang blokir)
     if (this.fetchCount % 10 === 0 && !varClient.isCfBlocked()) {
@@ -166,7 +186,7 @@ class GridBotEngine {
     return info.price;
   }
 
-  /** Paper: gunakan public read-only API */
+  /** Paper: gunakan public read-only API + quote/OI endpoint paralel */
   private async fetchPricePaper(): Promise<number> {
     const BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io";
     const res = await fetch(`${BASE_URL}/metadata/stats`, {
@@ -181,15 +201,34 @@ class GridBotEngine {
         mark_price: string;
         funding_rate: string;
         volume_24h: string;
+        funding_interval_s: number;
       }>;
     };
 
     const listing = data.listings?.find((l) => l.ticker === this.config.ticker);
     if (!listing) throw new Error(`Ticker "${this.config.ticker}" tidak ditemukan`);
 
+    const fundingIntervalS: number = listing.funding_interval_s ?? 3600;
+    this.fundingIntervalS = fundingIntervalS;
     this.fundingRate = (parseFloat(listing.funding_rate) * 100).toFixed(4) + "%";
     this.volume24h = "$" + (parseFloat(listing.volume_24h) / 1_000_000).toFixed(2) + "M";
     this.consecutiveErrors = 0;
+
+    // Fetch quote dan OI secara paralel, non-blocking — silent fail
+    Promise.all([
+      varClient.getQuote(this.config.ticker, fundingIntervalS),
+      varClient.getOpenInterest(this.config.ticker, fundingIntervalS),
+    ]).then(([quote, oi]) => {
+      if (quote) {
+        this.bid = quote.bid;
+        this.ask = quote.ask;
+        this.indexPrice = quote.indexPrice;
+      }
+      if (oi) {
+        this.openInterestLong = oi.longQty;
+        this.openInterestShort = oi.shortQty;
+      }
+    }).catch(() => {});
 
     return parseFloat(listing.mark_price);
   }
@@ -432,6 +471,11 @@ class GridBotEngine {
     this.fundingRate = "—";
     this.volume24h = "—";
     this.consecutiveErrors = 0;
+    this.bid = null;
+    this.ask = null;
+    this.indexPrice = null;
+    this.openInterestLong = null;
+    this.openInterestShort = null;
     this.liveBalanceUsdc = null;
     this.liveUpnl = null;
     this.initGrid();
@@ -457,6 +501,11 @@ class GridBotEngine {
       running: this.running,
       ticker: this.config.ticker,
       currentPrice: this.currentPrice,
+      bid: this.bid,
+      ask: this.ask,
+      indexPrice: this.indexPrice,
+      openInterestLong: this.openInterestLong,
+      openInterestShort: this.openInterestShort,
       balance: this.config.mode === "live"
         ? (this.liveBalanceUsdc ?? this.config.initialBalance)
         : this.balance,
