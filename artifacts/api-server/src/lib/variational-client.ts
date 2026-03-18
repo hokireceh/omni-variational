@@ -267,13 +267,11 @@ class VariationalClient {
   }
 
   private isCloudflareBlock(res: CurlResponse): boolean {
-    return (
-      (res.status === 403 || res.status === 503) &&
-      (res.body.includes("Just a moment") ||
-        res.body.includes("cf-browser-verification") ||
-        res.body.includes("__cf_chl") ||
-        res.body.includes("Cloudflare"))
-    );
+    if (res.status !== 403 && res.status !== 503) return false;
+    const trimmed = res.body.trimStart();
+    // Any HTML response on 403/503 is treated as a block (Cloudflare or Variational auth wall)
+    const isHtml = trimmed.startsWith("<!") || trimmed.startsWith("<html") || trimmed.startsWith("<HTML");
+    return isHtml;
   }
 
   private async authedCurl(
